@@ -1,4 +1,4 @@
-# my-dashboard-backend/helepr-scripts
+# my-dashboard-backend/helper-scripts
 
 ## Overview
 
@@ -15,9 +15,9 @@ Validation scripts for API behavior and key business flows.
 From `my-dashboard-backend`:
 
 ```bash
-bash ./helepr-scripts/smoke.sh
-bash ./helepr-scripts/test-roles.sh
-bash ./helepr-scripts/test-routes.sh
+bash ./helper-scripts/smoke.sh
+bash ./helper-scripts/test-roles.sh
+bash ./helper-scripts/test-routes.sh
 ```
 
 Default `BASE_URL`: `http://localhost:8081`.
