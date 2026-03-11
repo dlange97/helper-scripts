@@ -1,0 +1,48 @@
+# Ignore Python, Composer, and build artifacts
+*.pyc
+__pycache__/
+.env
+.env.*
+var/
+vendor/
+node_modules/
+.DS_Store
+.idea/
+*.log
+*.lock
+*.tmp
+
+# Ignore Docker and local configs
+docker/
+*.local
+*.env
+
+# Ignore migrations and cache
+migrations/
+cache/
+
+# Ignore test outputs
+test-output/
+
+# Ignore dist and build
+build/
+dist/
+
+# Ignore coverage
+coverage/
+
+# Ignore frontend artifacts
+*.js
+*.jsx
+*.ts
+*.tsx
+*.css
+*.map
+
+# Ignore editor files
+*.swp
+*.swo
+*.bak
+
+# Ignore other system files
+Thumbs.db
