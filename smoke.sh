@@ -7,6 +7,9 @@ COMPOSE=(docker compose -f "$PROJECT_ROOT/my-dashboard-docker/docker-compose.yml
 BASE_URL="${BASE_URL:-http://localhost:8081}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin.test@micro.com}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-Admin123!}"
+MYSQL_ROOT_PASSWORD_VALUE="${MYSQL_ROOT_PASSWORD:-root_secret}"
+MYSQL_APP_USER_VALUE="${MYSQL_USER:-app}"
+MYSQL_APP_PASSWORD_VALUE="${MYSQL_PASSWORD:-secret}"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -119,9 +122,43 @@ run_migration() {
   exit 1
 }
 
+ensure_mysql_bootstrap() {
+  local attempts="${1:-30}"
+  local delay="${2:-2}"
+  local attempt
+
+  echo "==> Ensuring MySQL databases and grants exist"
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if compose_exec mysql sh -lc "mysql -uroot -p\"$MYSQL_ROOT_PASSWORD_VALUE\" <<SQL
+CREATE DATABASE IF NOT EXISTS auth CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS dashboard CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS events CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS notifications CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '$MYSQL_APP_USER_VALUE'@'%' IDENTIFIED BY '$MYSQL_APP_PASSWORD_VALUE';
+ALTER USER '$MYSQL_APP_USER_VALUE'@'%' IDENTIFIED BY '$MYSQL_APP_PASSWORD_VALUE';
+GRANT ALL PRIVILEGES ON auth.* TO '$MYSQL_APP_USER_VALUE'@'%';
+GRANT ALL PRIVILEGES ON dashboard.* TO '$MYSQL_APP_USER_VALUE'@'%';
+GRANT ALL PRIVILEGES ON events.* TO '$MYSQL_APP_USER_VALUE'@'%';
+GRANT ALL PRIVILEGES ON notifications.* TO '$MYSQL_APP_USER_VALUE'@'%';
+FLUSH PRIVILEGES;
+SQL" >/dev/null 2>&1; then
+      echo "✅ MySQL bootstrap done"
+      return 0
+    fi
+
+    sleep "$delay"
+  done
+
+  echo "❌ MySQL bootstrap failed" >&2
+  dump_service_logs mysql
+  exit 1
+}
+
 echo "==> Ensuring services are up"
 "${COMPOSE[@]}" up -d mysql rabbitmq >/dev/null
 wait_for_health_status mysql healthy
+ensure_mysql_bootstrap
 
 "${COMPOSE[@]}" up -d auth-php notification-php dashboard-php events-php nginx >/dev/null
 
