@@ -11,6 +11,7 @@ Validation scripts for API behavior and key business flows.
 - `test-routes.sh` — focused route endpoints check.
 - `quality.sh` — backend quality gates for all services (PHPCS, PHPStan, coverage check).
 - `performance.sh` — API performance regression checks with automatic cleanup of temporary users and test data.
+- `run-all-checks.sh` — single command orchestrator for endpoint verification, smoke, quality, performance and frontend checks.
 
 ## Run
 
@@ -22,6 +23,7 @@ bash ./helper-scripts/test-roles.sh
 bash ./helper-scripts/test-routes.sh
 bash ./helper-scripts/quality.sh
 bash ./helper-scripts/performance.sh
+bash ./helper-scripts/run-all-checks.sh
 ```
 
 Default `BASE_URL`: `http://localhost:8081`.
