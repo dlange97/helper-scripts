@@ -12,11 +12,21 @@ permissions:
 jobs:
   create-pr:
     runs-on: ubuntu-latest
+    env:
+      AUTO_PR_TOKEN: ${{ secrets.AUTO_PR_TOKEN }}
 
     steps:
+      - name: Skip when AUTO_PR_TOKEN is missing
+        if: ${{ env.AUTO_PR_TOKEN == '' }}
+        run: |
+          echo "Missing AUTO_PR_TOKEN secret."
+          echo "Create a classic PAT or fine-grained token with pull request write access and save it as AUTO_PR_TOKEN."
+
       - name: Create or reuse PR to main
+        if: ${{ env.AUTO_PR_TOKEN != '' }}
         uses: actions/github-script@v7
         with:
+          github-token: ${{ env.AUTO_PR_TOKEN }}
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
