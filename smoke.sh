@@ -108,15 +108,42 @@ run_migration() {
   local delay="${6:-3}"
   local attempt
   local migrations_count
+  local migrations_dir=""
   local migrate_output
 
-  migrations_count="$(compose_exec "$service" sh -lc 'ls -1 /app/migrations/Version*.php 2>/dev/null | wc -l | tr -d " "' 2>/dev/null || echo "0")"
-  if [[ "$migrations_count" == "0" ]]; then
-    echo "❌ $description has no migration files in /app/migrations (cannot create $database_name.$required_table)" >&2
-    compose_exec "$service" sh -lc 'pwd; ls -la /app; ls -la /app/migrations 2>/dev/null || true' >&2 || true
+  # Detect migration directory dynamically; some containers can expose code under
+  # different roots or need a short warm-up before bind mounts are fully visible.
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    migrations_dir="$(compose_exec "$service" sh -lc '
+      for d in /app/migrations migrations /var/www/migrations /var/www/html/migrations; do
+        [ -d "$d" ] || continue
+        c="$(find "$d" -maxdepth 1 -type f -name "*.php" 2>/dev/null | wc -l | tr -d " ")"
+        if [ "$c" -gt 0 ]; then
+          echo "$d"
+          exit 0
+        fi
+      done
+      exit 1
+    ' 2>/dev/null || true)"
+
+    if [[ -n "$migrations_dir" ]]; then
+      break
+    fi
+
+    if (( attempt < attempts )); then
+      sleep "$delay"
+    fi
+  done
+
+  migrations_count="$(compose_exec "$service" sh -lc "find '$migrations_dir' -maxdepth 1 -type f -name '*.php' 2>/dev/null | wc -l | tr -d ' '" 2>/dev/null || echo "0")"
+  if [[ -z "$migrations_dir" || "$migrations_count" == "0" ]]; then
+    echo "❌ $description has no migration files (cannot create $database_name.$required_table)" >&2
+    compose_exec "$service" sh -lc 'pwd; ls -la /app 2>/dev/null || true; ls -la /app/migrations 2>/dev/null || true; ls -la migrations 2>/dev/null || true; ls -la /var/www/migrations 2>/dev/null || true; ls -la /var/www/html/migrations 2>/dev/null || true' >&2 || true
     dump_service_logs "$service"
     exit 1
   fi
+
+  echo "==> $description migration files detected in $migrations_dir ($migrations_count files)"
 
   for ((attempt = 1; attempt <= attempts; attempt++)); do
     # Keep Doctrine metadata storage in sync to avoid create-table races/incompatibilities.
@@ -132,8 +159,8 @@ run_migration() {
       if (( attempt == attempts )); then
         echo "--- migration status ---" >&2
         compose_exec "$service" php bin/console doctrine:migrations:status >&2 || true
-        echo "--- migration files in /app/migrations ---" >&2
-        compose_exec "$service" sh -lc 'ls -la /app/migrations' >&2 || true
+        echo "--- migration files in $migrations_dir ---" >&2
+        compose_exec "$service" sh -lc "ls -la '$migrations_dir'" >&2 || true
         echo "--- tables in $database_name ---" >&2
         "${COMPOSE[@]}" exec -T \
           -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
