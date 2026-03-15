@@ -115,7 +115,18 @@ run_migration() {
         return 0
       fi
 
-      echo "⚠️  $description migrations reported success but table $database_name.$required_table is still missing" >&2
+      echo "⚠️  $description migrations reported success but table $database_name.$required_table is still missing (attempt $attempt/$attempts)" >&2
+      if (( attempt == attempts )); then
+        echo "--- migration status ---" >&2
+        compose_exec "$service" php bin/console doctrine:migrations:status >&2 || true
+        echo "--- tables in $database_name ---" >&2
+        "${COMPOSE[@]}" exec -T \
+          -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+          mysql \
+          mysql -uroot \
+          -e "SHOW TABLES IN \`${database_name}\`;" \
+          >&2 || true
+      fi
     fi
 
     if (( attempt < attempts )); then
@@ -133,10 +144,14 @@ mysql_table_exists() {
   local table_name="$2"
   local result
 
-  result="$(compose_exec mysql sh -lc "MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD_VALUE\" mysql -N -B -uroot -e \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '$database_name' AND table_name = '$table_name';\"" 2>/dev/null || echo "0")"
-  result="$(printf '%s\n' "$result" | grep -Eo '[0-9]+' | tail -n1)"
+  result="$("${COMPOSE[@]}" exec -T \
+    -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+    mysql \
+    mysql -sN -uroot \
+    -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${database_name}' AND table_name='${table_name}';" \
+    2>/dev/null)" || return 1
 
-  [[ "$result" == "1" ]]
+  [[ "${result}" == "1" ]]
 }
 
 assert_mysql_table_exists() {
@@ -150,7 +165,12 @@ assert_mysql_table_exists() {
   fi
 
   echo "❌ Missing required table after migrations: $database_name.$table_name" >&2
-  compose_exec mysql sh -lc "MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD_VALUE\" mysql -uroot -e \"SHOW DATABASES; USE $database_name; SHOW TABLES;\"" >&2 || true
+  "${COMPOSE[@]}" exec -T \
+    -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+    mysql \
+    mysql -uroot \
+    -e "SHOW DATABASES; USE ${database_name}; SHOW TABLES;" \
+    >&2 || true
   exit 1
 }
 
