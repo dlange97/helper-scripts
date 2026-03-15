@@ -58,6 +58,27 @@ request() {
   curl "${args[@]}"
 }
 
+resolve_path_prefix() {
+  local output_file="$1"
+  local method="$2"
+  local auth_token="$3"
+  local data="$4"
+  shift 4
+
+  local status=""
+  local path=""
+
+  for path in "$@"; do
+    status=$(request "$method" "$path" "$output_file" "$data" "$auth_token")
+    if [[ "$status" != "404" ]]; then
+      echo "$path"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 assert_status() {
   local name="$1"
   local actual="$2"
@@ -76,9 +97,17 @@ assert_status() {
 }
 
 echo "==> Login"
+LOGIN_PATH=$(resolve_path_prefix "$TMP_DIR/login_probe.json" POST "" "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}" "/api/auth/login" "/auth/login")
+if [[ -z "$LOGIN_PATH" ]]; then
+  echo "❌ login-path failed: could not resolve login route"
+  exit 1
+fi
+
+AUTH_PREFIX="${LOGIN_PATH%/login}"
+
 LOGIN_STATUS=""
 for attempt in {1..20}; do
-  LOGIN_STATUS=$(request POST /api/auth/login "$TMP_DIR/login.json" "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}")
+  LOGIN_STATUS=$(request POST "$LOGIN_PATH" "$TMP_DIR/login.json" "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}")
   if [[ "$LOGIN_STATUS" == "200" ]]; then
     break
   fi
@@ -107,14 +136,46 @@ if [[ -z "$TOKEN" ]]; then
   exit 1
 fi
 
+INBOX_PATH=$(resolve_path_prefix "$TMP_DIR/notification_probe.json" GET "$TOKEN" "" "/api/notifications/inbox" "/notification/inbox")
+if [[ -z "$INBOX_PATH" ]]; then
+  echo "❌ notification-path failed: could not resolve inbox route"
+  exit 1
+fi
+
+NOTIFICATION_PREFIX="${INBOX_PATH%/inbox}"
+
+ROUTES_COLLECTION_PATH=$(resolve_path_prefix "$TMP_DIR/routes_probe.json" GET "$TOKEN" "" "/api/routes" "/events/routes")
+if [[ -z "$ROUTES_COLLECTION_PATH" ]]; then
+  echo "❌ routes-path failed: could not resolve routes collection route"
+  exit 1
+fi
+
+TODOS_COLLECTION_PATH=$(resolve_path_prefix "$TMP_DIR/todos_probe.json" GET "$TOKEN" "" "/api/todos" "/dashboard/todos")
+if [[ -z "$TODOS_COLLECTION_PATH" ]]; then
+  echo "❌ todos-path failed: could not resolve todos collection route"
+  exit 1
+fi
+
+SHOPPING_COLLECTION_PATH=$(resolve_path_prefix "$TMP_DIR/shopping_probe.json" GET "$TOKEN" "" "/api/shopping-lists" "/dashboard/shopping-lists")
+if [[ -z "$SHOPPING_COLLECTION_PATH" ]]; then
+  echo "❌ shopping-path failed: could not resolve shopping collection route"
+  exit 1
+fi
+
+EVENTS_COLLECTION_PATH=$(resolve_path_prefix "$TMP_DIR/events_probe.json" GET "$TOKEN" "" "/api/events" "/events")
+if [[ -z "$EVENTS_COLLECTION_PATH" ]]; then
+  echo "❌ events-path failed: could not resolve events collection route"
+  exit 1
+fi
+
 echo "==> Auth me"
-ME_STATUS=$(request GET /api/auth/me "$TMP_DIR/me.json" "" "$TOKEN")
+ME_STATUS=$(request GET "${AUTH_PREFIX}/me" "$TMP_DIR/me.json" "" "$TOKEN")
 assert_status "auth-me" "$ME_STATUS" "200" "$TMP_DIR/me.json"
 
 echo "==> Request access (public)"
 REQ_STATUS=""
 for attempt in {1..20}; do
-  REQ_STATUS=$(request POST /api/auth/request-access "$TMP_DIR/request_access.json" '{"email":"cleanup-smoke@example.com","firstName":"Smoke","lastName":"Test","message":"final cleanup smoke"}')
+  REQ_STATUS=$(request POST "${AUTH_PREFIX}/request-access" "$TMP_DIR/request_access.json" '{"email":"cleanup-smoke@example.com","firstName":"Smoke","lastName":"Test","message":"final cleanup smoke"}')
   if [[ "$REQ_STATUS" == "202" ]]; then
     break
   fi
@@ -129,19 +190,19 @@ done
 assert_status "request-access" "$REQ_STATUS" "202" "$TMP_DIR/request_access.json"
 
 echo "==> Inbox"
-INBOX_STATUS=$(request GET /api/notifications/inbox "$TMP_DIR/inbox.json" "" "$TOKEN")
+INBOX_STATUS=$(request GET "${NOTIFICATION_PREFIX}/inbox" "$TMP_DIR/inbox.json" "" "$TOKEN")
 assert_status "inbox" "$INBOX_STATUS" "200" "$TMP_DIR/inbox.json"
 
 echo "==> Notification template GET"
-TPL_GET_STATUS=$(request GET /api/notifications/settings/template/request-access "$TMP_DIR/template_get.json" "" "$TOKEN")
+TPL_GET_STATUS=$(request GET "${NOTIFICATION_PREFIX}/settings/template/request-access" "$TMP_DIR/template_get.json" "" "$TOKEN")
 assert_status "template-get" "$TPL_GET_STATUS" "200" "$TMP_DIR/template_get.json"
 
 echo "==> Notification template PUT"
-TPL_PUT_STATUS=$(request PUT /api/notifications/settings/template/request-access "$TMP_DIR/template_put.json" '{"channels":{"inbox":{"enabled":true,"title":"Access request from {{email}}","body":"Requester: {{email}}"},"email":{"enabled":false,"title":"Email req","body":"Email body"},"push":{"enabled":false,"title":"Push req","body":"Push body"}}}' "$TOKEN")
+TPL_PUT_STATUS=$(request PUT "${NOTIFICATION_PREFIX}/settings/template/request-access" "$TMP_DIR/template_put.json" '{"channels":{"inbox":{"enabled":true,"title":"Access request from {{email}}","body":"Requester: {{email}}"},"email":{"enabled":false,"title":"Email req","body":"Email body"},"push":{"enabled":false,"title":"Push req","body":"Push body"}}}' "$TOKEN")
 assert_status "template-put" "$TPL_PUT_STATUS" "200" "$TMP_DIR/template_put.json"
 
 echo "==> Todo create"
-TODO_CREATE_STATUS=$(request POST /api/todos "$TMP_DIR/todo_create.json" '{"text":"Smoke todo item"}' "$TOKEN")
+TODO_CREATE_STATUS=$(request POST "$TODOS_COLLECTION_PATH" "$TMP_DIR/todo_create.json" '{"text":"Smoke todo item"}' "$TOKEN")
 assert_status "todo-create" "$TODO_CREATE_STATUS" "201" "$TMP_DIR/todo_create.json"
 
 TODO_ID=$(python3 - <<PY
@@ -160,19 +221,19 @@ if [[ -z "$TODO_ID" ]]; then
 fi
 
 echo "==> Todo toggle"
-TODO_TOGGLE_STATUS=$(request PATCH "/api/todos/$TODO_ID/toggle" "$TMP_DIR/todo_toggle.json" '{}' "$TOKEN")
+TODO_TOGGLE_STATUS=$(request PATCH "${TODOS_COLLECTION_PATH}/$TODO_ID/toggle" "$TMP_DIR/todo_toggle.json" '{}' "$TOKEN")
 assert_status "todo-toggle" "$TODO_TOGGLE_STATUS" "200" "$TMP_DIR/todo_toggle.json"
 
 echo "==> Todo update"
-TODO_UPDATE_STATUS=$(request PATCH "/api/todos/$TODO_ID" "$TMP_DIR/todo_update.json" '{"text":"Smoke todo updated","done":false}' "$TOKEN")
+TODO_UPDATE_STATUS=$(request PATCH "${TODOS_COLLECTION_PATH}/$TODO_ID" "$TMP_DIR/todo_update.json" '{"text":"Smoke todo updated","done":false}' "$TOKEN")
 assert_status "todo-update" "$TODO_UPDATE_STATUS" "200" "$TMP_DIR/todo_update.json"
 
 echo "==> Todo delete"
-TODO_DELETE_STATUS=$(request DELETE "/api/todos/$TODO_ID" "$TMP_DIR/todo_delete.json" "" "$TOKEN")
+TODO_DELETE_STATUS=$(request DELETE "${TODOS_COLLECTION_PATH}/$TODO_ID" "$TMP_DIR/todo_delete.json" "" "$TOKEN")
 assert_status "todo-delete" "$TODO_DELETE_STATUS" "204" "$TMP_DIR/todo_delete.json"
 
 echo "==> Event create"
-EVENT_CREATE_STATUS=$(request POST /api/events "$TMP_DIR/event_create.json" '{"title":"Smoke Event","description":"Event smoke test","startAt":"2030-01-10T12:00:00+00:00","endAt":"2030-01-10T14:00:00+00:00","location":{"display_name":"Kraków","lat":50.06143,"lon":19.93658}}' "$TOKEN")
+EVENT_CREATE_STATUS=$(request POST "$EVENTS_COLLECTION_PATH" "$TMP_DIR/event_create.json" '{"title":"Smoke Event","description":"Event smoke test","startAt":"2030-01-10T12:00:00+00:00","endAt":"2030-01-10T14:00:00+00:00","location":{"display_name":"Kraków","lat":50.06143,"lon":19.93658}}' "$TOKEN")
 assert_status "event-create" "$EVENT_CREATE_STATUS" "201" "$TMP_DIR/event_create.json"
 
 EVENT_ID=$(python3 - <<PY
@@ -191,15 +252,15 @@ if [[ -z "$EVENT_ID" ]]; then
 fi
 
 echo "==> Event upcoming"
-EVENT_UPCOMING_STATUS=$(request GET /api/events/upcoming "$TMP_DIR/event_upcoming.json" "" "$TOKEN")
+EVENT_UPCOMING_STATUS=$(request GET "${EVENTS_COLLECTION_PATH}/upcoming" "$TMP_DIR/event_upcoming.json" "" "$TOKEN")
 assert_status "event-upcoming" "$EVENT_UPCOMING_STATUS" "200" "$TMP_DIR/event_upcoming.json"
 
 echo "==> Event update"
-EVENT_UPDATE_STATUS=$(request PUT "/api/events/$EVENT_ID" "$TMP_DIR/event_update.json" '{"title":"Smoke Event Updated","description":"Updated event smoke test"}' "$TOKEN")
+EVENT_UPDATE_STATUS=$(request PUT "${EVENTS_COLLECTION_PATH}/$EVENT_ID" "$TMP_DIR/event_update.json" '{"title":"Smoke Event Updated","description":"Updated event smoke test"}' "$TOKEN")
 assert_status "event-update" "$EVENT_UPDATE_STATUS" "200" "$TMP_DIR/event_update.json"
 
 echo "==> Shopping list create"
-SHOP_CREATE_STATUS=$(request POST /api/shopping-lists "$TMP_DIR/shop_create.json" '{"name":"Smoke Shopping List","products":[{"name":"Milk","qty":2,"weight":"1L"},{"name":"Bread","qty":1}]}' "$TOKEN")
+SHOP_CREATE_STATUS=$(request POST "$SHOPPING_COLLECTION_PATH" "$TMP_DIR/shop_create.json" '{"name":"Smoke Shopping List","products":[{"name":"Milk","qty":2,"weight":"1L"},{"name":"Bread","qty":1}]}' "$TOKEN")
 assert_status "shopping-create" "$SHOP_CREATE_STATUS" "201" "$TMP_DIR/shop_create.json"
 
 SHOP_LIST_ID=$(python3 - <<PY
@@ -218,23 +279,23 @@ if [[ -z "$SHOP_LIST_ID" ]]; then
 fi
 
 echo "==> Shopping list update"
-SHOP_UPDATE_STATUS=$(request PUT "/api/shopping-lists/$SHOP_LIST_ID" "$TMP_DIR/shop_update.json" '{"name":"Smoke Shopping List Updated","status":"active","products":[{"name":"Milk","qty":3,"weight":"1L","bought":true,"position":0},{"name":"Bread","qty":2,"bought":false,"position":1}]}' "$TOKEN")
+SHOP_UPDATE_STATUS=$(request PUT "${SHOPPING_COLLECTION_PATH}/$SHOP_LIST_ID" "$TMP_DIR/shop_update.json" '{"name":"Smoke Shopping List Updated","status":"active","products":[{"name":"Milk","qty":3,"weight":"1L","bought":true,"position":0},{"name":"Bread","qty":2,"bought":false,"position":1}]}' "$TOKEN")
 assert_status "shopping-update" "$SHOP_UPDATE_STATUS" "200" "$TMP_DIR/shop_update.json"
 
 echo "==> Shopping list archive"
-SHOP_ARCHIVE_STATUS=$(request PATCH "/api/shopping-lists/$SHOP_LIST_ID/status" "$TMP_DIR/shop_archive.json" '{"status":"archived"}' "$TOKEN")
+SHOP_ARCHIVE_STATUS=$(request PATCH "${SHOPPING_COLLECTION_PATH}/$SHOP_LIST_ID/status" "$TMP_DIR/shop_archive.json" '{"status":"archived"}' "$TOKEN")
 assert_status "shopping-archive" "$SHOP_ARCHIVE_STATUS" "200" "$TMP_DIR/shop_archive.json"
 
 echo "==> Shopping list restore"
-SHOP_RESTORE_STATUS=$(request PATCH "/api/shopping-lists/$SHOP_LIST_ID/status" "$TMP_DIR/shop_restore.json" '{"status":"active"}' "$TOKEN")
+SHOP_RESTORE_STATUS=$(request PATCH "${SHOPPING_COLLECTION_PATH}/$SHOP_LIST_ID/status" "$TMP_DIR/shop_restore.json" '{"status":"active"}' "$TOKEN")
 assert_status "shopping-restore" "$SHOP_RESTORE_STATUS" "200" "$TMP_DIR/shop_restore.json"
 
 echo "==> Shopping list delete"
-SHOP_DELETE_STATUS=$(request DELETE "/api/shopping-lists/$SHOP_LIST_ID" "$TMP_DIR/shop_delete.json" "" "$TOKEN")
+SHOP_DELETE_STATUS=$(request DELETE "${SHOPPING_COLLECTION_PATH}/$SHOP_LIST_ID" "$TMP_DIR/shop_delete.json" "" "$TOKEN")
 assert_status "shopping-delete" "$SHOP_DELETE_STATUS" "204" "$TMP_DIR/shop_delete.json"
 
 echo "==> Route create"
-ROUTE_CREATE_STATUS=$(request POST /api/routes "$TMP_DIR/route_create.json" '{"name":"Smoke Route","description":"Route smoke test","geoJson":{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"LineString","coordinates":[[19.94,50.06],[19.95,50.065],[19.96,50.07]]},"properties":{"name":"Smoke Route"}}]},"distanceMeters":1300,"durationMinutes":16,"waypoints":[[50.06,19.94],[50.065,19.95],[50.07,19.96]],"eventId":'"$EVENT_ID"'}' "$TOKEN")
+ROUTE_CREATE_STATUS=$(request POST "$ROUTES_COLLECTION_PATH" "$TMP_DIR/route_create.json" '{"name":"Smoke Route","description":"Route smoke test","geoJson":{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"LineString","coordinates":[[19.94,50.06],[19.95,50.065],[19.96,50.07]]},"properties":{"name":"Smoke Route"}}]},"distanceMeters":1300,"durationMinutes":16,"waypoints":[[50.06,19.94],[50.065,19.95],[50.07,19.96]],"eventId":'"$EVENT_ID"'}' "$TOKEN")
 assert_status "route-create" "$ROUTE_CREATE_STATUS" "201" "$TMP_DIR/route_create.json"
 
 ROUTE_ID=$(python3 - <<PY
@@ -253,35 +314,35 @@ if [[ -z "$ROUTE_ID" ]]; then
 fi
 
 echo "==> Route list"
-ROUTES_STATUS=$(request GET /api/routes "$TMP_DIR/routes_list.json" "" "$TOKEN")
+ROUTES_STATUS=$(request GET "$ROUTES_COLLECTION_PATH" "$TMP_DIR/routes_list.json" "" "$TOKEN")
 assert_status "route-list" "$ROUTES_STATUS" "200" "$TMP_DIR/routes_list.json"
 
 echo "==> Route update"
-ROUTE_UPDATE_STATUS=$(request PUT "/api/routes/$ROUTE_ID" "$TMP_DIR/route_update.json" '{"name":"Smoke Route Updated","durationMinutes":18}' "$TOKEN")
+ROUTE_UPDATE_STATUS=$(request PUT "${ROUTES_COLLECTION_PATH}/$ROUTE_ID" "$TMP_DIR/route_update.json" '{"name":"Smoke Route Updated","durationMinutes":18}' "$TOKEN")
 assert_status "route-update" "$ROUTE_UPDATE_STATUS" "200" "$TMP_DIR/route_update.json"
 
 echo "==> Route by event"
-ROUTES_BY_EVENT_STATUS=$(request GET "/api/routes/event/$EVENT_ID" "$TMP_DIR/routes_by_event.json" "" "$TOKEN")
+ROUTES_BY_EVENT_STATUS=$(request GET "${ROUTES_COLLECTION_PATH}/event/$EVENT_ID" "$TMP_DIR/routes_by_event.json" "" "$TOKEN")
 assert_status "route-by-event" "$ROUTES_BY_EVENT_STATUS" "200" "$TMP_DIR/routes_by_event.json"
 
 echo "==> Route delete"
-ROUTE_DELETE_STATUS=$(request DELETE "/api/routes/$ROUTE_ID" "$TMP_DIR/route_delete.json" "" "$TOKEN")
+ROUTE_DELETE_STATUS=$(request DELETE "${ROUTES_COLLECTION_PATH}/$ROUTE_ID" "$TMP_DIR/route_delete.json" "" "$TOKEN")
 assert_status "route-delete" "$ROUTE_DELETE_STATUS" "204" "$TMP_DIR/route_delete.json"
 
 echo "==> Event delete"
-EVENT_DELETE_STATUS=$(request DELETE "/api/events/$EVENT_ID" "$TMP_DIR/event_delete.json" "" "$TOKEN")
+EVENT_DELETE_STATUS=$(request DELETE "${EVENTS_COLLECTION_PATH}/$EVENT_ID" "$TMP_DIR/event_delete.json" "" "$TOKEN")
 assert_status "event-delete" "$EVENT_DELETE_STATUS" "204" "$TMP_DIR/event_delete.json"
 
 echo "==> Public register blocked"
-REGISTER_STATUS=$(request POST /api/auth/register "$TMP_DIR/register_public.json" '{"email":"public@example.com","password":"secret123","firstName":"Public","lastName":"User"}')
+REGISTER_STATUS=$(request POST "${AUTH_PREFIX}/register" "$TMP_DIR/register_public.json" '{"email":"public@example.com","password":"secret123","firstName":"Public","lastName":"User"}')
 assert_status "register-public" "$REGISTER_STATUS" "401" "$TMP_DIR/register_public.json"
 
 echo "==> Roles list (auth/roles)"
-ROLES_LIST_STATUS=$(request GET /api/auth/roles "$TMP_DIR/roles_list.json" "" "$TOKEN")
+ROLES_LIST_STATUS=$(request GET "${AUTH_PREFIX}/roles" "$TMP_DIR/roles_list.json" "" "$TOKEN")
 assert_status "roles-list" "$ROLES_LIST_STATUS" "200" "$TMP_DIR/roles_list.json"
 
 echo "==> Role create (custom)"
-ROLE_CREATE_STATUS=$(request POST /api/auth/roles "$TMP_DIR/role_create.json" '{"name":"Smoke Viewer","slug":"ROLE_SMOKE_VIEWER","permissions":["dashboard.view","map.view"]}' "$TOKEN")
+ROLE_CREATE_STATUS=$(request POST "${AUTH_PREFIX}/roles" "$TMP_DIR/role_create.json" '{"name":"Smoke Viewer","slug":"ROLE_SMOKE_VIEWER","permissions":["dashboard.view","map.view"]}' "$TOKEN")
 assert_status "role-create" "$ROLE_CREATE_STATUS" "201" "$TMP_DIR/role_create.json"
 
 SMOKE_ROLE_ID=$(python3 - <<PY
@@ -293,15 +354,15 @@ PY
 )
 
 echo "==> Role rename (PUT)"
-ROLE_UPDATE_STATUS=$(request PUT "/api/auth/roles/$SMOKE_ROLE_ID" "$TMP_DIR/role_update.json" '{"name":"Smoke Viewer Renamed"}' "$TOKEN")
+ROLE_UPDATE_STATUS=$(request PUT "${AUTH_PREFIX}/roles/$SMOKE_ROLE_ID" "$TMP_DIR/role_update.json" '{"name":"Smoke Viewer Renamed"}' "$TOKEN")
 assert_status "role-rename" "$ROLE_UPDATE_STATUS" "200" "$TMP_DIR/role_update.json"
 
 echo "==> Role delete"
-ROLE_DELETE_STATUS=$(request DELETE "/api/auth/roles/$SMOKE_ROLE_ID" "$TMP_DIR/role_delete.json" "" "$TOKEN")
+ROLE_DELETE_STATUS=$(request DELETE "${AUTH_PREFIX}/roles/$SMOKE_ROLE_ID" "$TMP_DIR/role_delete.json" "" "$TOKEN")
 assert_status "role-delete" "$ROLE_DELETE_STATUS" "204" "$TMP_DIR/role_delete.json"
 
 echo "==> Access settings has roleDefinitions"
-ACCESS_SETTINGS_STATUS=$(request GET /api/auth/settings/access "$TMP_DIR/access_settings.json" "" "$TOKEN")
+ACCESS_SETTINGS_STATUS=$(request GET "${AUTH_PREFIX}/settings/access" "$TMP_DIR/access_settings.json" "" "$TOKEN")
 assert_status "access-settings" "$ACCESS_SETTINGS_STATUS" "200" "$TMP_DIR/access_settings.json"
 
 HAS_DEFS=$(python3 - <<PY
