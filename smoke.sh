@@ -19,17 +19,87 @@ need_cmd docker
 need_cmd curl
 need_cmd python3
 
+compose_exec() {
+  local service="$1"
+  shift
+
+  "${COMPOSE[@]}" exec -T "$service" "$@"
+}
+
+dump_service_logs() {
+  local service="$1"
+
+  echo "---- logs: $service ----" >&2
+  "${COMPOSE[@]}" logs --tail=120 "$service" >&2 || true
+  echo "------------------------" >&2
+}
+
+wait_for_console_ready() {
+  local service="$1"
+  local description="$2"
+  local attempts="${3:-80}"
+  local delay="${4:-3}"
+  local attempt
+
+  echo "==> Waiting for $description"
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if compose_exec "$service" sh -lc 'test -f vendor/autoload.php && php bin/console about >/dev/null 2>&1'; then
+      echo "✅ $description is ready"
+      return 0
+    fi
+
+    sleep "$delay"
+  done
+
+  echo "❌ $description did not become ready in time" >&2
+  dump_service_logs "$service"
+  exit 1
+}
+
+run_migration() {
+  local service="$1"
+  local description="$2"
+  local attempts="${3:-10}"
+  local delay="${4:-3}"
+  local attempt
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if compose_exec "$service" php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration >/dev/null; then
+      echo "✅ $description migrations finished"
+      return 0
+    fi
+
+    if (( attempt < attempts )); then
+      sleep "$delay"
+    fi
+  done
+
+  echo "❌ $description migrations failed" >&2
+  dump_service_logs "$service"
+  exit 1
+}
+
 echo "==> Ensuring services are up"
-"${COMPOSE[@]}" up -d >/dev/null
+"${COMPOSE[@]}" up -d mysql rabbitmq auth-php notification-php dashboard-php events-php nginx >/dev/null
+
+wait_for_console_ready auth-php "auth service"
+wait_for_console_ready notification-php "notification service"
+wait_for_console_ready dashboard-php "dashboard service"
+wait_for_console_ready events-php "events service"
 
 echo "==> Running DB migrations"
-"${COMPOSE[@]}" exec -T auth-php php bin/console doctrine:migrations:migrate --no-interaction >/dev/null
-"${COMPOSE[@]}" exec -T notification-php php bin/console doctrine:migrations:migrate --no-interaction >/dev/null
-"${COMPOSE[@]}" exec -T dashboard-php php bin/console doctrine:migrations:migrate --no-interaction >/dev/null
-"${COMPOSE[@]}" exec -T events-php php bin/console doctrine:migrations:migrate --no-interaction >/dev/null
+run_migration auth-php "auth service"
+run_migration notification-php "notification service"
+run_migration dashboard-php "dashboard service"
+run_migration events-php "events service"
+
+echo "==> Starting async worker"
+"${COMPOSE[@]}" up -d notification-worker >/dev/null
+wait_for_console_ready notification-worker "notification worker"
 
 echo "==> Ensuring smoke admin user exists"
-"${COMPOSE[@]}" exec -T auth-php php bin/console app:create-test-user \
+compose_exec auth-php php bin/console app:create-test-user \
   --email "$ADMIN_EMAIL" \
   --password "$ADMIN_PASSWORD" \
   --firstName Admin \
