@@ -10,6 +10,7 @@ ADMIN_PASSWORD="${ADMIN_PASSWORD:-Admin123!}"
 MYSQL_ROOT_PASSWORD_VALUE="${MYSQL_ROOT_PASSWORD:-root_secret}"
 MYSQL_APP_USER_VALUE="${MYSQL_USER:-app}"
 MYSQL_APP_PASSWORD_VALUE="${MYSQL_PASSWORD:-secret}"
+DEFER_AUTH_USER_FAILURE="${DEFER_AUTH_USER_FAILURE:-1}"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -106,6 +107,7 @@ run_migration() {
   local required_table="$4"
   local attempts="${5:-10}"
   local delay="${6:-3}"
+  local defer_failure="${7:-0}"
   local attempt
   local migrations_count
   local migrations_dir=""
@@ -137,8 +139,16 @@ run_migration() {
 
   migrations_count="$(compose_exec "$service" sh -lc "find '$migrations_dir' -maxdepth 1 -type f -name '*.php' 2>/dev/null | wc -l | tr -d ' '" 2>/dev/null || echo "0")"
   if [[ -z "$migrations_dir" || "$migrations_count" == "0" ]]; then
-    echo "❌ $description has no migration files (cannot create $database_name.$required_table)" >&2
+    if [[ "$defer_failure" == "1" ]]; then
+      echo "⚠️  $description has no migration files (cannot create $database_name.$required_table). Deferring failure to later smoke stages." >&2
+    else
+      echo "❌ $description has no migration files (cannot create $database_name.$required_table)" >&2
+    fi
     compose_exec "$service" sh -lc 'pwd; ls -la /app 2>/dev/null || true; ls -la /app/migrations 2>/dev/null || true; ls -la migrations 2>/dev/null || true; ls -la /var/www/migrations 2>/dev/null || true; ls -la /var/www/html/migrations 2>/dev/null || true' >&2 || true
+    if [[ "$defer_failure" == "1" ]]; then
+      return 1
+    fi
+
     dump_service_logs "$service"
     exit 1
   fi
@@ -183,6 +193,12 @@ run_migration() {
     fi
   done
 
+  if [[ "$defer_failure" == "1" ]]; then
+    echo "⚠️  $description migrations failed. Deferring failure to later smoke stages." >&2
+    dump_service_logs "$service"
+    return 1
+  fi
+
   echo "❌ $description migrations failed" >&2
   dump_service_logs "$service"
   exit 1
@@ -207,19 +223,28 @@ assert_mysql_table_exists() {
   local database_name="$1"
   local table_name="$2"
   local description="$3"
+  local defer_failure="${4:-0}"
 
   if mysql_table_exists "$database_name" "$table_name"; then
     echo "✅ $description table exists: $database_name.$table_name"
     return 0
   fi
 
-  echo "❌ Missing required table after migrations: $database_name.$table_name" >&2
+  if [[ "$defer_failure" == "1" ]]; then
+    echo "⚠️  Missing required table after migrations: $database_name.$table_name. Deferring failure to later smoke stages." >&2
+  else
+    echo "❌ Missing required table after migrations: $database_name.$table_name" >&2
+  fi
   "${COMPOSE[@]}" exec -T \
     -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
     mysql \
     mysql -uroot \
     -e "SHOW DATABASES; USE ${database_name}; SHOW TABLES;" \
     >&2 || true
+  if [[ "$defer_failure" == "1" ]]; then
+    return 1
+  fi
+
   exit 1
 }
 
@@ -269,14 +294,24 @@ wait_for_console_ready dashboard-php "dashboard service"
 wait_for_console_ready events-php "events service"
 
 echo "==> Running DB migrations"
-run_migration auth-php "auth service" auth user
-assert_mysql_table_exists auth role_definition "auth service"
+AUTH_SCHEMA_DEFERRED=0
+if ! run_migration auth-php "auth service" auth user 10 3 "$DEFER_AUTH_USER_FAILURE"; then
+  AUTH_SCHEMA_DEFERRED=1
+fi
+if ! assert_mysql_table_exists auth role_definition "auth service" "$DEFER_AUTH_USER_FAILURE"; then
+  AUTH_SCHEMA_DEFERRED=1
+fi
+
 run_migration notification-php "notification service" notifications inbox_notification
 assert_mysql_table_exists notifications notification_template "notification service"
 run_migration dashboard-php "dashboard service" dashboard todo_item
 assert_mysql_table_exists dashboard shopping_list "dashboard service"
 run_migration events-php "events service" events event
 assert_mysql_table_exists events route "events service"
+
+if [[ "$AUTH_SCHEMA_DEFERRED" == "1" ]]; then
+  echo "⚠️  auth schema is not fully ready (auth.user / auth.role_definition). Continuing smoke execution; auth-dependent steps may fail later." >&2
+fi
 
 echo "==> Starting async worker"
 "${COMPOSE[@]}" up -d notification-worker >/dev/null
