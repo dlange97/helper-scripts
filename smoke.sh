@@ -133,7 +133,8 @@ mysql_table_exists() {
   local table_name="$2"
   local result
 
-  result="$(compose_exec mysql sh -lc "mysql -N -B -uroot -p\"$MYSQL_ROOT_PASSWORD_VALUE\" -e \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '$database_name' AND table_name = '$table_name';\"" 2>/dev/null || echo "0")"
+  result="$(compose_exec mysql sh -lc "MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD_VALUE\" mysql -N -B -uroot -e \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '$database_name' AND table_name = '$table_name';\"" 2>/dev/null || echo "0")"
+  result="$(printf '%s\n' "$result" | grep -Eo '[0-9]+' | tail -n1)"
 
   [[ "$result" == "1" ]]
 }
@@ -149,7 +150,7 @@ assert_mysql_table_exists() {
   fi
 
   echo "❌ Missing required table after migrations: $database_name.$table_name" >&2
-  compose_exec mysql sh -lc "mysql -uroot -p\"$MYSQL_ROOT_PASSWORD_VALUE\" -e \"SHOW DATABASES; USE $database_name; SHOW TABLES;\"" >&2 || true
+  compose_exec mysql sh -lc "MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD_VALUE\" mysql -uroot -e \"SHOW DATABASES; USE $database_name; SHOW TABLES;\"" >&2 || true
   exit 1
 }
 
@@ -161,7 +162,7 @@ ensure_mysql_bootstrap() {
   echo "==> Ensuring MySQL databases and grants exist"
 
   for ((attempt = 1; attempt <= attempts; attempt++)); do
-    if compose_exec mysql sh -lc "mysql -uroot -p\"$MYSQL_ROOT_PASSWORD_VALUE\" <<SQL
+    if compose_exec mysql sh -lc "MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD_VALUE\" mysql -uroot <<SQL
 CREATE DATABASE IF NOT EXISTS auth CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE DATABASE IF NOT EXISTS dashboard CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE DATABASE IF NOT EXISTS events CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
