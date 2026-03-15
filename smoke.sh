@@ -34,6 +34,45 @@ dump_service_logs() {
   echo "------------------------" >&2
 }
 
+get_service_container_id() {
+  local service="$1"
+
+  "${COMPOSE[@]}" ps -q "$service"
+}
+
+wait_for_health_status() {
+  local service="$1"
+  local expected_status="$2"
+  local attempts="${3:-90}"
+  local delay="${4:-2}"
+  local attempt
+  local container_id
+  local current_status
+
+  container_id="$(get_service_container_id "$service")"
+  if [[ -z "$container_id" ]]; then
+    echo "❌ Could not resolve container id for service: $service" >&2
+    exit 1
+  fi
+
+  echo "==> Waiting for $service health: $expected_status"
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    current_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id" 2>/dev/null || echo "unknown")"
+
+    if [[ "$current_status" == "$expected_status" ]]; then
+      echo "✅ $service health is $expected_status"
+      return 0
+    fi
+
+    sleep "$delay"
+  done
+
+  echo "❌ $service did not reach health status: $expected_status" >&2
+  dump_service_logs "$service"
+  exit 1
+}
+
 wait_for_console_ready() {
   local service="$1"
   local description="$2"
@@ -81,7 +120,10 @@ run_migration() {
 }
 
 echo "==> Ensuring services are up"
-"${COMPOSE[@]}" up -d mysql rabbitmq auth-php notification-php dashboard-php events-php nginx >/dev/null
+"${COMPOSE[@]}" up -d mysql rabbitmq >/dev/null
+wait_for_health_status mysql healthy
+
+"${COMPOSE[@]}" up -d auth-php notification-php dashboard-php events-php nginx >/dev/null
 
 wait_for_console_ready auth-php "auth service"
 wait_for_console_ready notification-php "notification service"
