@@ -107,9 +107,22 @@ run_migration() {
   local attempts="${5:-10}"
   local delay="${6:-3}"
   local attempt
+  local migrations_count
+  local migrate_output
+
+  migrations_count="$(compose_exec "$service" sh -lc 'ls -1 /app/migrations/Version*.php 2>/dev/null | wc -l | tr -d " "' 2>/dev/null || echo "0")"
+  if [[ "$migrations_count" == "0" ]]; then
+    echo "❌ $description has no migration files in /app/migrations (cannot create $database_name.$required_table)" >&2
+    compose_exec "$service" sh -lc 'pwd; ls -la /app; ls -la /app/migrations 2>/dev/null || true' >&2 || true
+    dump_service_logs "$service"
+    exit 1
+  fi
 
   for ((attempt = 1; attempt <= attempts; attempt++)); do
-    if compose_exec "$service" php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration >/dev/null; then
+    # Keep Doctrine metadata storage in sync to avoid create-table races/incompatibilities.
+    compose_exec "$service" php bin/console doctrine:migrations:sync-metadata-storage --no-interaction >/dev/null 2>&1 || true
+
+    if migrate_output="$(compose_exec "$service" php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration 2>&1)"; then
       if mysql_table_exists "$database_name" "$required_table"; then
         echo "✅ $description migrations finished"
         return 0
@@ -119,6 +132,8 @@ run_migration() {
       if (( attempt == attempts )); then
         echo "--- migration status ---" >&2
         compose_exec "$service" php bin/console doctrine:migrations:status >&2 || true
+        echo "--- migration files in /app/migrations ---" >&2
+        compose_exec "$service" sh -lc 'ls -la /app/migrations' >&2 || true
         echo "--- tables in $database_name ---" >&2
         "${COMPOSE[@]}" exec -T \
           -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
@@ -126,6 +141,13 @@ run_migration() {
           mysql -uroot \
           -e "SHOW TABLES IN \`${database_name}\`;" \
           >&2 || true
+      fi
+    else
+      if grep -qi "doctrine_migration_versions.*already exists" <<<"$migrate_output"; then
+        echo "⚠️  $description migration metadata table already exists, re-syncing storage (attempt $attempt/$attempts)" >&2
+        compose_exec "$service" php bin/console doctrine:migrations:sync-metadata-storage --no-interaction >/dev/null 2>&1 || true
+      else
+        echo "$migrate_output" >&2
       fi
     fi
 
