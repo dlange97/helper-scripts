@@ -102,14 +102,20 @@ wait_for_console_ready() {
 run_migration() {
   local service="$1"
   local description="$2"
-  local attempts="${3:-10}"
-  local delay="${4:-3}"
+  local database_name="$3"
+  local required_table="$4"
+  local attempts="${5:-10}"
+  local delay="${6:-3}"
   local attempt
 
   for ((attempt = 1; attempt <= attempts; attempt++)); do
     if compose_exec "$service" php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration >/dev/null; then
-      echo "✅ $description migrations finished"
-      return 0
+      if mysql_table_exists "$database_name" "$required_table"; then
+        echo "✅ $description migrations finished"
+        return 0
+      fi
+
+      echo "⚠️  $description migrations reported success but table $database_name.$required_table is still missing" >&2
     fi
 
     if (( attempt < attempts )); then
@@ -119,6 +125,31 @@ run_migration() {
 
   echo "❌ $description migrations failed" >&2
   dump_service_logs "$service"
+  exit 1
+}
+
+mysql_table_exists() {
+  local database_name="$1"
+  local table_name="$2"
+  local result
+
+  result="$(compose_exec mysql sh -lc "mysql -N -B -uroot -p\"$MYSQL_ROOT_PASSWORD_VALUE\" -e \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '$database_name' AND table_name = '$table_name';\"" 2>/dev/null || echo "0")"
+
+  [[ "$result" == "1" ]]
+}
+
+assert_mysql_table_exists() {
+  local database_name="$1"
+  local table_name="$2"
+  local description="$3"
+
+  if mysql_table_exists "$database_name" "$table_name"; then
+    echo "✅ $description table exists: $database_name.$table_name"
+    return 0
+  fi
+
+  echo "❌ Missing required table after migrations: $database_name.$table_name" >&2
+  compose_exec mysql sh -lc "mysql -uroot -p\"$MYSQL_ROOT_PASSWORD_VALUE\" -e \"SHOW DATABASES; USE $database_name; SHOW TABLES;\"" >&2 || true
   exit 1
 }
 
@@ -168,10 +199,14 @@ wait_for_console_ready dashboard-php "dashboard service"
 wait_for_console_ready events-php "events service"
 
 echo "==> Running DB migrations"
-run_migration auth-php "auth service"
-run_migration notification-php "notification service"
-run_migration dashboard-php "dashboard service"
-run_migration events-php "events service"
+run_migration auth-php "auth service" auth user
+assert_mysql_table_exists auth role_definition "auth service"
+run_migration notification-php "notification service" notifications inbox_notification
+assert_mysql_table_exists notifications notification_template "notification service"
+run_migration dashboard-php "dashboard service" dashboard todo_item
+assert_mysql_table_exists dashboard shopping_list "dashboard service"
+run_migration events-php "events service" events event
+assert_mysql_table_exists events route "events service"
 
 echo "==> Starting async worker"
 "${COMPOSE[@]}" up -d notification-worker >/dev/null
