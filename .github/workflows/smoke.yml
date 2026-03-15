@@ -4,15 +4,10 @@ on:
   push:
     branches:
       - main
-      - name: Checkout frontend repo
-        uses: actions/checkout@v3
-        with:
-          repository: dlange/my-dashboard-frontend
-          token: ${{ secrets.GH_TOKEN }}
-          path: my-dashboard-frontend
-            repository: dlange97/my-dashboard-frontend
-            path: my-dashboard-frontend
-            token: ${{ secrets.GH_TOKEN }}
+      - develop
+  workflow_dispatch:
+
+jobs:
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -63,6 +58,13 @@ on:
         with:
           repository: dlange97/my-dashboard-docker
           path: my-dashboard-docker
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Checkout frontend
+        uses: actions/checkout@v4
+        with:
+          repository: dlange97/my-dashboard-frontend
+          path: my-dashboard-frontend
           token: ${{ secrets.GH_TOKEN }}
 
       - name: Prepare Python
