@@ -1,0 +1,76 @@
+name: Smoke
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout helper-scripts
+        uses: actions/checkout@v4
+        with:
+          path: my-dashboard-backend/helper-scripts
+
+      - name: Checkout auth-service
+        uses: actions/checkout@v4
+        with:
+          repository: dlange97/auth-service
+          path: my-dashboard-backend/auth-service
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Checkout dashboard-service
+        uses: actions/checkout@v4
+        with:
+          repository: dlange97/dashboard-service
+          path: my-dashboard-backend/dashboard-service
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Checkout events-service
+        uses: actions/checkout@v4
+        with:
+          repository: dlange97/events-service
+          path: my-dashboard-backend/events-service
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Checkout notification-service
+        uses: actions/checkout@v4
+        with:
+          repository: dlange97/notification-service
+          path: my-dashboard-backend/notification-service
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Checkout shared-bundle
+        uses: actions/checkout@v4
+        with:
+          repository: dlange97/shared-bundle
+          path: my-dashboard-backend/shared-bundle
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Checkout docker stack
+        uses: actions/checkout@v4
+        with:
+          repository: dlange97/my-dashboard-docker
+          path: my-dashboard-docker
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Checkout frontend
+        uses: actions/checkout@v4
+        with:
+          repository: dlange97/my-dashboard-frontend
+          path: my-dashboard-frontend
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Prepare Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run smoke suite
+        run: bash ./my-dashboard-backend/helper-scripts/smoke.sh
