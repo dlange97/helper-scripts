@@ -111,6 +111,7 @@ run_migration() {
   local attempt
   local migrations_count
   local migrations_dir=""
+  local missing_migrations="0"
   local migrate_output
 
   # Detect migration directory dynamically; some containers can expose code under
@@ -139,21 +140,12 @@ run_migration() {
 
   migrations_count="$(compose_exec "$service" sh -lc "find '$migrations_dir' -maxdepth 1 -type f -name '*.php' 2>/dev/null | wc -l | tr -d ' '" 2>/dev/null || echo "0")"
   if [[ -z "$migrations_dir" || "$migrations_count" == "0" ]]; then
-    if [[ "$defer_failure" == "1" ]]; then
-      echo "⚠️  $description has no migration files (cannot create $database_name.$required_table). Deferring failure to later smoke stages." >&2
-    else
-      echo "❌ $description has no migration files (cannot create $database_name.$required_table)" >&2
-    fi
+    echo "⚠️  $description has no migration files detected before migrate attempt (target: $database_name.$required_table)." >&2
     compose_exec "$service" sh -lc 'pwd; ls -la /app 2>/dev/null || true; ls -la /app/migrations 2>/dev/null || true; ls -la migrations 2>/dev/null || true; ls -la /var/www/migrations 2>/dev/null || true; ls -la /var/www/html/migrations 2>/dev/null || true' >&2 || true
-    if [[ "$defer_failure" == "1" ]]; then
-      return 1
-    fi
-
-    dump_service_logs "$service"
-    exit 1
+    missing_migrations="1"
+  else
+    echo "==> $description migration files detected in $migrations_dir ($migrations_count files)"
   fi
-
-  echo "==> $description migration files detected in $migrations_dir ($migrations_count files)"
 
   for ((attempt = 1; attempt <= attempts; attempt++)); do
     # Keep Doctrine metadata storage in sync to avoid create-table races/incompatibilities.
@@ -169,8 +161,10 @@ run_migration() {
       if (( attempt == attempts )); then
         echo "--- migration status ---" >&2
         compose_exec "$service" php bin/console doctrine:migrations:status >&2 || true
-        echo "--- migration files in $migrations_dir ---" >&2
-        compose_exec "$service" sh -lc "ls -la '$migrations_dir'" >&2 || true
+        if [[ -n "$migrations_dir" ]]; then
+          echo "--- migration files in $migrations_dir ---" >&2
+          compose_exec "$service" sh -lc "ls -la '$migrations_dir'" >&2 || true
+        fi
         echo "--- tables in $database_name ---" >&2
         "${COMPOSE[@]}" exec -T \
           -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
@@ -192,6 +186,10 @@ run_migration() {
       sleep "$delay"
     fi
   done
+
+  if [[ "$missing_migrations" == "1" ]]; then
+    echo "⚠️  $description still has no migration files and did not create $database_name.$required_table." >&2
+  fi
 
   if [[ "$defer_failure" == "1" ]]; then
     echo "⚠️  $description migrations failed. Deferring failure to later smoke stages." >&2
