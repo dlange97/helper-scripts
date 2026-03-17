@@ -259,12 +259,14 @@ CREATE DATABASE IF NOT EXISTS auth CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode
 CREATE DATABASE IF NOT EXISTS dashboard CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE DATABASE IF NOT EXISTS events CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE DATABASE IF NOT EXISTS notifications CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS translations CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '$MYSQL_APP_USER_VALUE'@'%' IDENTIFIED BY '$MYSQL_APP_PASSWORD_VALUE';
 ALTER USER '$MYSQL_APP_USER_VALUE'@'%' IDENTIFIED BY '$MYSQL_APP_PASSWORD_VALUE';
 GRANT ALL PRIVILEGES ON auth.* TO '$MYSQL_APP_USER_VALUE'@'%';
 GRANT ALL PRIVILEGES ON dashboard.* TO '$MYSQL_APP_USER_VALUE'@'%';
 GRANT ALL PRIVILEGES ON events.* TO '$MYSQL_APP_USER_VALUE'@'%';
 GRANT ALL PRIVILEGES ON notifications.* TO '$MYSQL_APP_USER_VALUE'@'%';
+GRANT ALL PRIVILEGES ON translations.* TO '$MYSQL_APP_USER_VALUE'@'%';
 FLUSH PRIVILEGES;
 SQL" >/dev/null 2>&1; then
       echo "✅ MySQL bootstrap done"
@@ -284,12 +286,15 @@ echo "==> Ensuring services are up"
 wait_for_health_status mysql healthy
 ensure_mysql_bootstrap
 
-"${COMPOSE[@]}" up -d auth-php notification-php dashboard-php events-php nginx >/dev/null
+"${COMPOSE[@]}" up -d auth-php notification-php dashboard-php events-php translation-php nginx >/dev/null
+"${COMPOSE[@]}" up -d --force-recreate nginx >/dev/null
+"${COMPOSE[@]}" up -d --build --force-recreate translation-php >/dev/null
 
 wait_for_console_ready auth-php "auth service"
 wait_for_console_ready notification-php "notification service"
 wait_for_console_ready dashboard-php "dashboard service"
 wait_for_console_ready events-php "events service"
+wait_for_console_ready translation-php "translation service"
 
 echo "==> Running DB migrations"
 AUTH_SCHEMA_DEFERRED=0
@@ -306,6 +311,8 @@ run_migration dashboard-php "dashboard service" dashboard todo_item
 assert_mysql_table_exists dashboard shopping_list "dashboard service"
 run_migration events-php "events service" events event
 assert_mysql_table_exists events route "events service"
+run_migration translation-php "translation service" translations translation 10 3
+assert_mysql_table_exists translations translation "translation service"
 
 if [[ "$AUTH_SCHEMA_DEFERRED" == "1" ]]; then
   echo "⚠️  auth schema is not fully ready (auth.user / auth.role_definition). Continuing smoke execution; auth-dependent steps may fail later." >&2
@@ -455,9 +462,25 @@ if [[ -z "$EVENTS_COLLECTION_PATH" ]]; then
   exit 1
 fi
 
+TRANSLATIONS_PATH=$(resolve_path_prefix "$TMP_DIR/translations_probe.json" GET "$TOKEN" "" "/api/translation/translations?locale=en" "/translation/translations?locale=en")
+if [[ -z "$TRANSLATIONS_PATH" ]]; then
+  echo "❌ translations-path failed: could not resolve translations route"
+  exit 1
+fi
+
+TRANSLATION_PREFIX="${TRANSLATIONS_PATH%/translations?locale=en}"
+
 echo "==> Auth me"
 ME_STATUS=$(request GET "${AUTH_PREFIX}/me" "$TMP_DIR/me.json" "" "$TOKEN")
 assert_status "auth-me" "$ME_STATUS" "200" "$TMP_DIR/me.json"
+
+echo "==> Translations (user)"
+TRANSLATIONS_STATUS=$(request GET "${TRANSLATION_PREFIX}/translations?locale=en" "$TMP_DIR/translations_en.json" "" "$TOKEN")
+assert_status "translations-user" "$TRANSLATIONS_STATUS" "200" "$TMP_DIR/translations_en.json"
+
+echo "==> Translations (admin list)"
+TRANSLATIONS_ADMIN_STATUS=$(request GET "${TRANSLATION_PREFIX}/admin/translations?locale=en" "$TMP_DIR/translations_admin.json" "" "$TOKEN")
+assert_status "translations-admin" "$TRANSLATIONS_ADMIN_STATUS" "200" "$TMP_DIR/translations_admin.json"
 
 echo "==> Request access (public)"
 REQ_STATUS=""
@@ -670,6 +693,7 @@ echo "✅ access-settings-defs: roleDefinitions present (>=4)"
 printf "\n🎉 Smoke passed on clean stack\n"
 echo "- login: 200"
 echo "- auth-me: 200"
+echo "- translations user/admin: 200/200"
 echo "- request-access: 202"
 echo "- inbox: 200"
 echo "- template GET/PUT: 200/200"
