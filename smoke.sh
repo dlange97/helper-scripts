@@ -4,12 +4,27 @@ set -euo pipefail
 BACKEND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_ROOT="$(cd "$BACKEND_DIR/.." && pwd)"
 COMPOSE=(docker compose -f "$PROJECT_ROOT/my-dashboard-docker/docker-compose.yml")
-BASE_URL="${BASE_URL:-http://localhost:8081}"
-ADMIN_EMAIL="${ADMIN_EMAIL:-admin.test@micro.com}"
-ADMIN_PASSWORD="${ADMIN_PASSWORD:-Admin123!}"
-MYSQL_ROOT_PASSWORD_VALUE="${MYSQL_ROOT_PASSWORD:-root_secret}"
-MYSQL_APP_USER_VALUE="${MYSQL_USER:-app}"
-MYSQL_APP_PASSWORD_VALUE="${MYSQL_PASSWORD:-secret}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+load_env_file() {
+  local env_file="$1"
+  if [[ -f "$env_file" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$env_file"
+    set +a
+  fi
+}
+
+load_env_file "$SCRIPT_DIR/.env"
+load_env_file "$SCRIPT_DIR/.env.dev"
+
+BASE_URL="${BASE_URL:?BASE_URL must be set in helper-scripts/.env or environment}"
+ADMIN_EMAIL="${ADMIN_EMAIL:?ADMIN_EMAIL must be set in helper-scripts/.env.dev or environment}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in helper-scripts/.env.dev or environment}"
+MYSQL_ROOT_PASSWORD_VALUE="${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set in helper-scripts/.env or environment}"
+MYSQL_APP_USER_VALUE="${MYSQL_USER:?MYSQL_USER must be set in helper-scripts/.env or environment}"
+MYSQL_APP_PASSWORD_VALUE="${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set in helper-scripts/.env or environment}"
 DEFER_AUTH_USER_FAILURE="${DEFER_AUTH_USER_FAILURE:-0}"
 
 need_cmd() {
@@ -313,6 +328,7 @@ run_migration events-php "events service" events event
 assert_mysql_table_exists events route "events service"
 run_migration translation-php "translation service" translations translation 10 3
 assert_mysql_table_exists translations translation "translation service"
+assert_mysql_table_exists translations translation_group "translation service"
 
 if [[ "$AUTH_SCHEMA_DEFERRED" == "1" ]]; then
   echo "⚠️  auth schema is not fully ready (auth.user / auth.role_definition). Continuing smoke execution; auth-dependent steps may fail later." >&2
@@ -479,8 +495,41 @@ TRANSLATIONS_STATUS=$(request GET "${TRANSLATION_PREFIX}/translations?locale=en"
 assert_status "translations-user" "$TRANSLATIONS_STATUS" "200" "$TMP_DIR/translations_en.json"
 
 echo "==> Translations (admin list)"
-TRANSLATIONS_ADMIN_STATUS=$(request GET "${TRANSLATION_PREFIX}/admin/translations?locale=en" "$TMP_DIR/translations_admin.json" "" "$TOKEN")
+TRANSLATIONS_ADMIN_STATUS=$(request GET "${TRANSLATION_PREFIX}/admin/translations" "$TMP_DIR/translations_admin.json" "" "$TOKEN")
 assert_status "translations-admin" "$TRANSLATIONS_ADMIN_STATUS" "200" "$TMP_DIR/translations_admin.json"
+
+echo "==> Translations (admin create pair)"
+SMOKE_TRANSLATION_KEY="smoke.translation.$(date +%s)"
+TRANSLATIONS_CREATE_STATUS=$(request POST "${TRANSLATION_PREFIX}/admin/translations" "$TMP_DIR/translations_create.json" "{\"translationKey\":\"$SMOKE_TRANSLATION_KEY\",\"values\":{\"en\":\"Smoke EN\",\"pl\":\"Smoke PL\"}}" "$TOKEN")
+assert_status "translations-admin-create" "$TRANSLATIONS_CREATE_STATUS" "201" "$TMP_DIR/translations_create.json"
+
+echo "==> Translations (admin update pair)"
+TRANSLATIONS_UPDATE_STATUS=$(request PUT "${TRANSLATION_PREFIX}/admin/translations/$SMOKE_TRANSLATION_KEY" "$TMP_DIR/translations_update.json" '{"values":{"en":"Smoke EN Updated","pl":"Smoke PL Updated"}}' "$TOKEN")
+assert_status "translations-admin-update" "$TRANSLATIONS_UPDATE_STATUS" "200" "$TMP_DIR/translations_update.json"
+
+echo "==> Translations (user verify after update)"
+TRANSLATIONS_VERIFY_STATUS=$(request GET "${TRANSLATION_PREFIX}/translations?locale=en" "$TMP_DIR/translations_verify.json" "" "$TOKEN")
+assert_status "translations-user-verify" "$TRANSLATIONS_VERIFY_STATUS" "200" "$TMP_DIR/translations_verify.json"
+
+HAS_UPDATED_KEY=$(python3 - <<PY
+import json
+with open("$TMP_DIR/translations_verify.json", "r", encoding="utf-8") as f:
+    payload = json.load(f)
+print("yes" if payload.get("$SMOKE_TRANSLATION_KEY") == "Smoke EN Updated" else "no")
+PY
+)
+
+if [[ "$HAS_UPDATED_KEY" != "yes" ]]; then
+  echo "❌ translations-user-verify failed: updated key value not found"
+  cat "$TMP_DIR/translations_verify.json"
+  echo
+  exit 1
+fi
+echo "✅ translations-user-verify: updated key is visible"
+
+echo "==> Translations (admin delete pair)"
+TRANSLATIONS_DELETE_STATUS=$(request DELETE "${TRANSLATION_PREFIX}/admin/translations/$SMOKE_TRANSLATION_KEY" "$TMP_DIR/translations_delete.json" "" "$TOKEN")
+assert_status "translations-admin-delete" "$TRANSLATIONS_DELETE_STATUS" "204" "$TMP_DIR/translations_delete.json"
 
 echo "==> Request access (public)"
 REQ_STATUS=""
@@ -694,6 +743,7 @@ printf "\n🎉 Smoke passed on clean stack\n"
 echo "- login: 200"
 echo "- auth-me: 200"
 echo "- translations user/admin: 200/200"
+echo "- translations admin CRUD pair: 201/200/204"
 echo "- request-access: 202"
 echo "- inbox: 200"
 echo "- template GET/PUT: 200/200"

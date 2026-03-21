@@ -1,8 +1,9 @@
 # Ignore Python, Composer, and build artifacts
 *.pyc
 __pycache__/
-.env
-.env.*
+.env.dev
+.env.local
+.env.*.local
 var/
 vendor/
 node_modules/
@@ -15,7 +16,6 @@ node_modules/
 # Ignore Docker and local configs
 docker/
 *.local
-*.env
 
 # Ignore migrations and cache
 migrations/

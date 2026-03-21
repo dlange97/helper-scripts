@@ -28,4 +28,7 @@ run_in_service "events-php" "cd /app && MIN_COVERAGE=${EVENTS_MIN_COVERAGE} comp
 echo "==> Running notification-service quality checks with coverage"
 run_in_service "notification-php" "cd /app && MIN_COVERAGE=${NOTIFICATION_MIN_COVERAGE} composer run quality"
 
+echo "==> Running translation-service quality checks (phpcs + phpstan + tests)"
+run_in_service "translation-php" "cd /app && composer run quality"
+
 echo "==> Quality checks completed successfully"
