@@ -6,6 +6,7 @@ PROJECT_ROOT="$(cd "$BACKEND_DIR/.." && pwd)"
 COMPOSE=(docker compose -f "$PROJECT_ROOT/my-dashboard-docker/docker-compose.yml")
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Load .env files if present, but allow fallback to defaults
 load_env_file() {
   local env_file="$1"
   if [[ -f "$env_file" ]]; then
@@ -19,12 +20,23 @@ load_env_file() {
 load_env_file "$SCRIPT_DIR/.env"
 load_env_file "$SCRIPT_DIR/.env.dev"
 
-BASE_URL="${BASE_URL:?BASE_URL must be set in helper-scripts/.env or environment}"
-ADMIN_EMAIL="${ADMIN_EMAIL:?ADMIN_EMAIL must be set in helper-scripts/.env.dev or environment}"
-ADMIN_PASSWORD="${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in helper-scripts/.env.dev or environment}"
-MYSQL_ROOT_PASSWORD_VALUE="${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set in helper-scripts/.env or environment}"
-MYSQL_APP_USER_VALUE="${MYSQL_USER:?MYSQL_USER must be set in helper-scripts/.env or environment}"
-MYSQL_APP_PASSWORD_VALUE="${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set in helper-scripts/.env or environment}"
+# Fallbacks for local/dev, but allow override from env or .env files
+BASE_URL="${BASE_URL:-http://localhost:8081}"
+ADMIN_EMAIL="${ADMIN_EMAIL:-admin.test@micro.com}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-Admin123!}"
+MYSQL_ROOT_PASSWORD_VALUE="${MYSQL_ROOT_PASSWORD:-root_secret}"
+MYSQL_APP_USER_VALUE="${MYSQL_USER:-app}"
+MYSQL_APP_PASSWORD_VALUE="${MYSQL_PASSWORD:-secret}"
+
+# If any required variable is still missing, fail with a clear error
+if [[ -z "$BASE_URL" ]]; then echo "BASE_URL must be set in helper-scripts/.env or environment"; exit 1; fi
+if [[ -z "$ADMIN_EMAIL" ]]; then echo "ADMIN_EMAIL must be set in helper-scripts/.env.dev or environment"; exit 1; fi
+if [[ -z "$ADMIN_PASSWORD" ]]; then echo "ADMIN_PASSWORD must be set in helper-scripts/.env.dev or environment"; exit 1; fi
+if [[ -z "$MYSQL_ROOT_PASSWORD_VALUE" ]]; then echo "MYSQL_ROOT_PASSWORD must be set in helper-scripts/.env or environment"; exit 1; fi
+if [[ -z "$MYSQL_APP_USER_VALUE" ]]; then echo "MYSQL_USER must be set in helper-scripts/.env or environment"; exit 1; fi
+if [[ -z "$MYSQL_APP_PASSWORD_VALUE" ]]; then echo "MYSQL_PASSWORD must be set in helper-scripts/.env or environment"; exit 1; fi
+
+DEFER_AUTH_USER_FAILURE="${DEFER_AUTH_USER_FAILURE:-0}"
 DEFER_AUTH_USER_FAILURE="${DEFER_AUTH_USER_FAILURE:-0}"
 
 need_cmd() {
