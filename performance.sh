@@ -4,9 +4,24 @@ set -euo pipefail
 BACKEND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_ROOT="$(cd "$BACKEND_DIR/.." && pwd)"
 COMPOSE=(docker compose -f "$PROJECT_ROOT/my-dashboard-docker/docker-compose.yml")
-BASE_URL="${BASE_URL:-http://localhost:8081}"
-ADMIN_EMAIL="${ADMIN_EMAIL:-admin.test@micro.com}"
-ADMIN_PASSWORD="${ADMIN_PASSWORD:-Admin123!}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+load_env_file() {
+  local env_file="$1"
+  if [[ -f "$env_file" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$env_file"
+    set +a
+  fi
+}
+
+load_env_file "$SCRIPT_DIR/.env"
+load_env_file "$SCRIPT_DIR/.env.dev"
+
+BASE_URL="${BASE_URL:?BASE_URL must be set in helper-scripts/.env or environment}"
+ADMIN_EMAIL="${ADMIN_EMAIL:?ADMIN_EMAIL must be set in helper-scripts/.env.dev or environment}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in helper-scripts/.env.dev or environment}"
 PERF_REQUESTS="${PERF_REQUESTS:-15}"
 
 need_cmd() {

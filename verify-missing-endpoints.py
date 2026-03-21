@@ -1,13 +1,38 @@
 #!/usr/bin/env python3
 import json
+import os
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
-BASE = 'http://localhost:8081'
-ADMIN_EMAIL = 'admin.test@micro.com'
-ADMIN_PASSWORD = 'Admin123!'
-INTERNAL_TOKEN = 'internal_notification_token_change_me'
+
+def load_env_file(path):
+    if not path.exists():
+        return
+
+    for raw_line in path.read_text(encoding='utf-8').splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+
+        key, value = line.split('=', 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+load_env_file(SCRIPT_DIR / '.env')
+load_env_file(SCRIPT_DIR / '.env.dev')
+
+BASE = os.getenv('BASE_URL', 'http://localhost:8081')
+ADMIN_EMAIL = os.getenv('ADMIN_EMAIL', '')
+ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', '')
+INTERNAL_TOKEN = os.getenv('INTERNAL_NOTIFICATION_TOKEN', '')
+if not ADMIN_EMAIL or not ADMIN_PASSWORD or not INTERNAL_TOKEN:
+    raise SystemExit('Missing ADMIN_EMAIL, ADMIN_PASSWORD, or INTERNAL_NOTIFICATION_TOKEN in helper-scripts/.env.dev')
+
 EMAIL = f'ui-check-{int(time.time())}@example.com'
 
 
@@ -62,7 +87,7 @@ check('users-list', status, 200)
 
 status, body = call('POST', '/auth/users', {
     'email': EMAIL,
-    'password': 'Admin123!',
+    'password': ADMIN_PASSWORD,
     'firstName': 'Ui',
     'lastName': 'Check',
     'role': 'ROLE_USER',

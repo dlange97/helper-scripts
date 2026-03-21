@@ -53,6 +53,13 @@ jobs:
           path: my-dashboard-backend/shared-bundle
           token: ${{ secrets.GH_TOKEN }}
 
+      - name: Checkout translation-service
+        uses: actions/checkout@v4
+        with:
+          repository: dlange97/translation-service
+          path: my-dashboard-backend/translation-service
+          token: ${{ secrets.GH_TOKEN }}
+
       - name: Checkout docker stack
         uses: actions/checkout@v4
         with:

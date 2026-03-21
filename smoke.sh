@@ -4,12 +4,39 @@ set -euo pipefail
 BACKEND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_ROOT="$(cd "$BACKEND_DIR/.." && pwd)"
 COMPOSE=(docker compose -f "$PROJECT_ROOT/my-dashboard-docker/docker-compose.yml")
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load .env files if present, but allow fallback to defaults
+load_env_file() {
+  local env_file="$1"
+  if [[ -f "$env_file" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$env_file"
+    set +a
+  fi
+}
+
+load_env_file "$SCRIPT_DIR/.env"
+load_env_file "$SCRIPT_DIR/.env.dev"
+
+# Fallbacks for local/dev, but allow override from env or .env files
 BASE_URL="${BASE_URL:-http://localhost:8081}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin.test@micro.com}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-Admin123!}"
 MYSQL_ROOT_PASSWORD_VALUE="${MYSQL_ROOT_PASSWORD:-root_secret}"
 MYSQL_APP_USER_VALUE="${MYSQL_USER:-app}"
 MYSQL_APP_PASSWORD_VALUE="${MYSQL_PASSWORD:-secret}"
+
+# If any required variable is still missing, fail with a clear error
+if [[ -z "$BASE_URL" ]]; then echo "BASE_URL must be set in helper-scripts/.env or environment"; exit 1; fi
+if [[ -z "$ADMIN_EMAIL" ]]; then echo "ADMIN_EMAIL must be set in helper-scripts/.env.dev or environment"; exit 1; fi
+if [[ -z "$ADMIN_PASSWORD" ]]; then echo "ADMIN_PASSWORD must be set in helper-scripts/.env.dev or environment"; exit 1; fi
+if [[ -z "$MYSQL_ROOT_PASSWORD_VALUE" ]]; then echo "MYSQL_ROOT_PASSWORD must be set in helper-scripts/.env or environment"; exit 1; fi
+if [[ -z "$MYSQL_APP_USER_VALUE" ]]; then echo "MYSQL_USER must be set in helper-scripts/.env or environment"; exit 1; fi
+if [[ -z "$MYSQL_APP_PASSWORD_VALUE" ]]; then echo "MYSQL_PASSWORD must be set in helper-scripts/.env or environment"; exit 1; fi
+
+DEFER_AUTH_USER_FAILURE="${DEFER_AUTH_USER_FAILURE:-0}"
 DEFER_AUTH_USER_FAILURE="${DEFER_AUTH_USER_FAILURE:-0}"
 
 need_cmd() {
@@ -259,12 +286,14 @@ CREATE DATABASE IF NOT EXISTS auth CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode
 CREATE DATABASE IF NOT EXISTS dashboard CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE DATABASE IF NOT EXISTS events CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE DATABASE IF NOT EXISTS notifications CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS translations CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '$MYSQL_APP_USER_VALUE'@'%' IDENTIFIED BY '$MYSQL_APP_PASSWORD_VALUE';
 ALTER USER '$MYSQL_APP_USER_VALUE'@'%' IDENTIFIED BY '$MYSQL_APP_PASSWORD_VALUE';
 GRANT ALL PRIVILEGES ON auth.* TO '$MYSQL_APP_USER_VALUE'@'%';
 GRANT ALL PRIVILEGES ON dashboard.* TO '$MYSQL_APP_USER_VALUE'@'%';
 GRANT ALL PRIVILEGES ON events.* TO '$MYSQL_APP_USER_VALUE'@'%';
 GRANT ALL PRIVILEGES ON notifications.* TO '$MYSQL_APP_USER_VALUE'@'%';
+GRANT ALL PRIVILEGES ON translations.* TO '$MYSQL_APP_USER_VALUE'@'%';
 FLUSH PRIVILEGES;
 SQL" >/dev/null 2>&1; then
       echo "✅ MySQL bootstrap done"
@@ -284,12 +313,26 @@ echo "==> Ensuring services are up"
 wait_for_health_status mysql healthy
 ensure_mysql_bootstrap
 
-"${COMPOSE[@]}" up -d auth-php notification-php dashboard-php events-php nginx >/dev/null
+SERVICES=(auth-php notification-php dashboard-php events-php nginx)
+if grep -qE '^\s*translation-php:' "$PROJECT_ROOT/my-dashboard-docker/docker-compose.yml" \
+  && [[ -d "$PROJECT_ROOT/my-dashboard-backend/translation-service" ]]; then
+  SERVICES+=(translation-php)
+elif grep -qE '^\s*translation-php:' "$PROJECT_ROOT/my-dashboard-docker/docker-compose.yml"; then
+  echo "⚠️  translation-php is defined in compose, but translation-service source is missing at $PROJECT_ROOT/my-dashboard-backend/translation-service. Skipping translation-php startup." >&2
+fi
+"${COMPOSE[@]}" up -d "${SERVICES[@]}" >/dev/null
+"${COMPOSE[@]}" up -d --force-recreate nginx >/dev/null
+if [[ " ${SERVICES[*]} " == *" translation-php "* ]]; then
+  "${COMPOSE[@]}" up -d --build --force-recreate translation-php >/dev/null
+fi
 
 wait_for_console_ready auth-php "auth service"
 wait_for_console_ready notification-php "notification service"
 wait_for_console_ready dashboard-php "dashboard service"
 wait_for_console_ready events-php "events service"
+if [[ " ${SERVICES[*]} " == *" translation-php "* ]]; then
+  wait_for_console_ready translation-php "translation service"
+fi
 
 echo "==> Running DB migrations"
 AUTH_SCHEMA_DEFERRED=0
@@ -306,6 +349,11 @@ run_migration dashboard-php "dashboard service" dashboard todo_item
 assert_mysql_table_exists dashboard shopping_list "dashboard service"
 run_migration events-php "events service" events event
 assert_mysql_table_exists events route "events service"
+if [[ " ${SERVICES[*]} " == *" translation-php "* ]]; then
+  run_migration translation-php "translation service" translations translation 10 3
+  assert_mysql_table_exists translations translation "translation service"
+  assert_mysql_table_exists translations translation_group "translation service"
+fi
 
 if [[ "$AUTH_SCHEMA_DEFERRED" == "1" ]]; then
   echo "⚠️  auth schema is not fully ready (auth.user / auth.role_definition). Continuing smoke execution; auth-dependent steps may fail later." >&2
@@ -455,9 +503,58 @@ if [[ -z "$EVENTS_COLLECTION_PATH" ]]; then
   exit 1
 fi
 
+TRANSLATIONS_PATH=$(resolve_path_prefix "$TMP_DIR/translations_probe.json" GET "$TOKEN" "" "/api/translation/translations?locale=en" "/translation/translations?locale=en")
+if [[ -z "$TRANSLATIONS_PATH" ]]; then
+  echo "❌ translations-path failed: could not resolve translations route"
+  exit 1
+fi
+
+TRANSLATION_PREFIX="${TRANSLATIONS_PATH%/translations?locale=en}"
+
 echo "==> Auth me"
 ME_STATUS=$(request GET "${AUTH_PREFIX}/me" "$TMP_DIR/me.json" "" "$TOKEN")
 assert_status "auth-me" "$ME_STATUS" "200" "$TMP_DIR/me.json"
+
+echo "==> Translations (user)"
+TRANSLATIONS_STATUS=$(request GET "${TRANSLATION_PREFIX}/translations?locale=en" "$TMP_DIR/translations_en.json" "" "$TOKEN")
+assert_status "translations-user" "$TRANSLATIONS_STATUS" "200" "$TMP_DIR/translations_en.json"
+
+echo "==> Translations (admin list)"
+TRANSLATIONS_ADMIN_STATUS=$(request GET "${TRANSLATION_PREFIX}/admin/translations" "$TMP_DIR/translations_admin.json" "" "$TOKEN")
+assert_status "translations-admin" "$TRANSLATIONS_ADMIN_STATUS" "200" "$TMP_DIR/translations_admin.json"
+
+echo "==> Translations (admin create pair)"
+SMOKE_TRANSLATION_KEY="smoke.translation.$(date +%s)"
+TRANSLATIONS_CREATE_STATUS=$(request POST "${TRANSLATION_PREFIX}/admin/translations" "$TMP_DIR/translations_create.json" "{\"translationKey\":\"$SMOKE_TRANSLATION_KEY\",\"values\":{\"en\":\"Smoke EN\",\"pl\":\"Smoke PL\"}}" "$TOKEN")
+assert_status "translations-admin-create" "$TRANSLATIONS_CREATE_STATUS" "201" "$TMP_DIR/translations_create.json"
+
+echo "==> Translations (admin update pair)"
+TRANSLATIONS_UPDATE_STATUS=$(request PUT "${TRANSLATION_PREFIX}/admin/translations/$SMOKE_TRANSLATION_KEY" "$TMP_DIR/translations_update.json" '{"values":{"en":"Smoke EN Updated","pl":"Smoke PL Updated"}}' "$TOKEN")
+assert_status "translations-admin-update" "$TRANSLATIONS_UPDATE_STATUS" "200" "$TMP_DIR/translations_update.json"
+
+echo "==> Translations (user verify after update)"
+TRANSLATIONS_VERIFY_STATUS=$(request GET "${TRANSLATION_PREFIX}/translations?locale=en" "$TMP_DIR/translations_verify.json" "" "$TOKEN")
+assert_status "translations-user-verify" "$TRANSLATIONS_VERIFY_STATUS" "200" "$TMP_DIR/translations_verify.json"
+
+HAS_UPDATED_KEY=$(python3 - <<PY
+import json
+with open("$TMP_DIR/translations_verify.json", "r", encoding="utf-8") as f:
+    payload = json.load(f)
+print("yes" if payload.get("$SMOKE_TRANSLATION_KEY") == "Smoke EN Updated" else "no")
+PY
+)
+
+if [[ "$HAS_UPDATED_KEY" != "yes" ]]; then
+  echo "❌ translations-user-verify failed: updated key value not found"
+  cat "$TMP_DIR/translations_verify.json"
+  echo
+  exit 1
+fi
+echo "✅ translations-user-verify: updated key is visible"
+
+echo "==> Translations (admin delete pair)"
+TRANSLATIONS_DELETE_STATUS=$(request DELETE "${TRANSLATION_PREFIX}/admin/translations/$SMOKE_TRANSLATION_KEY" "$TMP_DIR/translations_delete.json" "" "$TOKEN")
+assert_status "translations-admin-delete" "$TRANSLATIONS_DELETE_STATUS" "204" "$TMP_DIR/translations_delete.json"
 
 echo "==> Request access (public)"
 REQ_STATUS=""
@@ -670,6 +767,8 @@ echo "✅ access-settings-defs: roleDefinitions present (>=4)"
 printf "\n🎉 Smoke passed on clean stack\n"
 echo "- login: 200"
 echo "- auth-me: 200"
+echo "- translations user/admin: 200/200"
+echo "- translations admin CRUD pair: 201/200/204"
 echo "- request-access: 202"
 echo "- inbox: 200"
 echo "- template GET/PUT: 200/200"
