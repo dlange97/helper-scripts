@@ -314,8 +314,11 @@ wait_for_health_status mysql healthy
 ensure_mysql_bootstrap
 
 SERVICES=(auth-php notification-php dashboard-php events-php nginx)
-if grep -qE '^\s*translation-php:' "$PROJECT_ROOT/my-dashboard-docker/docker-compose.yml"; then
+if grep -qE '^\s*translation-php:' "$PROJECT_ROOT/my-dashboard-docker/docker-compose.yml" \
+  && [[ -d "$PROJECT_ROOT/my-dashboard-backend/translation-service" ]]; then
   SERVICES+=(translation-php)
+elif grep -qE '^\s*translation-php:' "$PROJECT_ROOT/my-dashboard-docker/docker-compose.yml"; then
+  echo "⚠️  translation-php is defined in compose, but translation-service source is missing at $PROJECT_ROOT/my-dashboard-backend/translation-service. Skipping translation-php startup." >&2
 fi
 "${COMPOSE[@]}" up -d "${SERVICES[@]}" >/dev/null
 "${COMPOSE[@]}" up -d --force-recreate nginx >/dev/null
