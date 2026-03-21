@@ -313,15 +313,23 @@ echo "==> Ensuring services are up"
 wait_for_health_status mysql healthy
 ensure_mysql_bootstrap
 
-"${COMPOSE[@]}" up -d auth-php notification-php dashboard-php events-php translation-php nginx >/dev/null
+SERVICES=(auth-php notification-php dashboard-php events-php nginx)
+if grep -qE '^\s*translation-php:' "$PROJECT_ROOT/my-dashboard-docker/docker-compose.yml"; then
+  SERVICES+=(translation-php)
+fi
+"${COMPOSE[@]}" up -d "${SERVICES[@]}" >/dev/null
 "${COMPOSE[@]}" up -d --force-recreate nginx >/dev/null
-"${COMPOSE[@]}" up -d --build --force-recreate translation-php >/dev/null
+if [[ " ${SERVICES[*]} " == *" translation-php "* ]]; then
+  "${COMPOSE[@]}" up -d --build --force-recreate translation-php >/dev/null
+fi
 
 wait_for_console_ready auth-php "auth service"
 wait_for_console_ready notification-php "notification service"
 wait_for_console_ready dashboard-php "dashboard service"
 wait_for_console_ready events-php "events service"
-wait_for_console_ready translation-php "translation service"
+if [[ " ${SERVICES[*]} " == *" translation-php "* ]]; then
+  wait_for_console_ready translation-php "translation service"
+fi
 
 echo "==> Running DB migrations"
 AUTH_SCHEMA_DEFERRED=0
@@ -338,9 +346,11 @@ run_migration dashboard-php "dashboard service" dashboard todo_item
 assert_mysql_table_exists dashboard shopping_list "dashboard service"
 run_migration events-php "events service" events event
 assert_mysql_table_exists events route "events service"
-run_migration translation-php "translation service" translations translation 10 3
-assert_mysql_table_exists translations translation "translation service"
-assert_mysql_table_exists translations translation_group "translation service"
+if [[ " ${SERVICES[*]} " == *" translation-php "* ]]; then
+  run_migration translation-php "translation service" translations translation 10 3
+  assert_mysql_table_exists translations translation "translation service"
+  assert_mysql_table_exists translations translation_group "translation service"
+fi
 
 if [[ "$AUTH_SCHEMA_DEFERRED" == "1" ]]; then
   echo "⚠️  auth schema is not fully ready (auth.user / auth.role_definition). Continuing smoke execution; auth-dependent steps may fail later." >&2
