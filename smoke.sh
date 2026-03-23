@@ -585,6 +585,18 @@ echo "==> Notification template PUT"
 TPL_PUT_STATUS=$(request PUT "${NOTIFICATION_PREFIX}/settings/template/request-access" "$TMP_DIR/template_put.json" '{"channels":{"inbox":{"enabled":true,"title":"Access request from {{email}}","body":"Requester: {{email}}"},"email":{"enabled":false,"title":"Email req","body":"Email body"},"push":{"enabled":false,"title":"Push req","body":"Push body"}}}' "$TOKEN")
 assert_status "template-put" "$TPL_PUT_STATUS" "200" "$TMP_DIR/template_put.json"
 
+echo "==> Todo list (GET collection)"
+TODO_LIST_STATUS=$(request GET "$TODOS_COLLECTION_PATH" "$TMP_DIR/todo_list.json" "" "$TOKEN")
+assert_status "todo-list" "$TODO_LIST_STATUS" "200" "$TMP_DIR/todo_list.json"
+
+echo "==> Shopping list (GET collection)"
+SHOP_LIST_STATUS=$(request GET "$SHOPPING_COLLECTION_PATH" "$TMP_DIR/shop_list.json" "" "$TOKEN")
+assert_status "shopping-list" "$SHOP_LIST_STATUS" "200" "$TMP_DIR/shop_list.json"
+
+echo "==> Events list (GET collection)"
+EVENTS_LIST_STATUS=$(request GET "$EVENTS_COLLECTION_PATH" "$TMP_DIR/events_list.json" "" "$TOKEN")
+assert_status "events-list" "$EVENTS_LIST_STATUS" "200" "$TMP_DIR/events_list.json"
+
 echo "==> Todo create"
 TODO_CREATE_STATUS=$(request POST "$TODOS_COLLECTION_PATH" "$TMP_DIR/todo_create.json" '{"text":"Smoke todo item"}' "$TOKEN")
 assert_status "todo-create" "$TODO_CREATE_STATUS" "201" "$TMP_DIR/todo_create.json"
@@ -772,9 +784,9 @@ echo "- translations admin CRUD pair: 201/200/204"
 echo "- request-access: 202"
 echo "- inbox: 200"
 echo "- template GET/PUT: 200/200"
-echo "- todos create/toggle/update/delete: 201/200/200/204"
-echo "- events create/upcoming/update/delete: 201/200/200/204"
-echo "- shopping create/update/archive/restore/delete: 201/200/200/200/204"
+echo "- todos list/create/toggle/update/delete: 200/201/200/200/204"
+echo "- events list/create/upcoming/update/delete: 200/201/200/200/204"
+echo "- shopping list/create/update/archive/restore/delete: 200/201/200/200/200/204"
 echo "- routes create/list/update/by-event/delete: 201/200/200/200/204"
 echo "- roles list/create/rename/delete: 200/201/200/204"
 echo "- access-settings roleDefinitions: present"
