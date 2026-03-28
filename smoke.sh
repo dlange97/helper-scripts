@@ -244,6 +244,43 @@ mysql_table_exists() {
   [[ "${result}" == "1" ]]
 }
 
+mysql_column_exists() {
+  local database_name="$1"
+  local table_name="$2"
+  local column_name="$3"
+  local result
+
+  result="$("${COMPOSE[@]}" exec -T \
+    -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+    mysql \
+    mysql -sN -uroot \
+    -e "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='${database_name}' AND table_name='${table_name}' AND column_name='${column_name}';" \
+    2>/dev/null)" || return 1
+
+  [[ "${result}" == "1" ]]
+}
+
+assert_mysql_column_exists() {
+  local database_name="$1"
+  local table_name="$2"
+  local column_name="$3"
+  local description="$4"
+
+  if mysql_column_exists "$database_name" "$table_name" "$column_name"; then
+    echo "✅ $description column exists: $database_name.$table_name.$column_name"
+    return 0
+  fi
+
+  echo "❌ Missing required column after migrations: $database_name.$table_name.$column_name" >&2
+  "${COMPOSE[@]}" exec -T \
+    -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+    mysql \
+    mysql -uroot \
+    -e "SHOW CREATE TABLE \`${database_name}\`.\`${table_name}\`;" \
+    >&2 || true
+  exit 1
+}
+
 assert_mysql_table_exists() {
   local database_name="$1"
   local table_name="$2"
@@ -352,6 +389,11 @@ wait_for_console_ready events-php "events service"
 if [[ " ${SERVICES[*]} " == *" translation-php "* ]]; then
   wait_for_console_ready translation-php "translation service"
 fi
+
+echo "==> Running early events migration guard"
+sleep 2
+compose_exec events-php php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration >/dev/null
+assert_mysql_column_exists events event shared_with_user_ids "events service"
 
 echo "==> Running DB migrations"
 AUTH_SCHEMA_DEFERRED=0
