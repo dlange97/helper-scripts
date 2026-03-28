@@ -368,6 +368,12 @@ run_migration dashboard-php "dashboard service" dashboard todo_item
 assert_mysql_table_exists dashboard shopping_list "dashboard service"
 run_migration events-php "events service" events event
 assert_mysql_table_exists events route "events service"
+echo "==> Validating events service schema mapping"
+if ! compose_exec events-php php bin/console doctrine:schema:validate --skip-sync 2>&1; then
+  echo "❌ events service schema validation failed — check entity/migration mismatch" >&2
+  exit 1
+fi
+echo "✅ events service schema valid"
 if [[ " ${SERVICES[*]} " == *" translation-php "* ]]; then
   run_migration translation-php "translation service" translations translation 10 3
   assert_mysql_table_exists translations translation "translation service"
