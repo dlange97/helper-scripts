@@ -313,6 +313,25 @@ echo "==> Ensuring services are up"
 wait_for_health_status mysql healthy
 ensure_mysql_bootstrap
 
+echo "==> Rebuilding notification images (no cache)"
+BUILD_LOG="${TMPDIR:-/tmp}/smoke-notification-build.log"
+for attempt in 1 2 3; do
+  if "${COMPOSE[@]}" build --no-cache notification-php notification-worker >"$BUILD_LOG" 2>&1; then
+    echo "✅ notification images rebuilt"
+    break
+  fi
+
+  echo "⚠️  notification image rebuild failed (attempt ${attempt}/3)" >&2
+  tail -n 120 "$BUILD_LOG" >&2 || true
+
+  if [[ "$attempt" == "3" ]]; then
+    echo "❌ notification image rebuild failed after 3 attempts" >&2
+    exit 1
+  fi
+
+  sleep 2
+done
+
 SERVICES=(auth-php notification-php dashboard-php events-php nginx)
 if grep -qE '^\s*translation-php:' "$PROJECT_ROOT/my-dashboard-docker/docker-compose.yml" \
   && [[ -d "$PROJECT_ROOT/my-dashboard-backend/translation-service" ]]; then
