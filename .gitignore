@@ -1,48 +1,23 @@
-# Ignore Python, Composer, and build artifacts
+# Python artifacts
 *.pyc
 __pycache__/
+
+# Local env overrides (secrets, never commit)
 .env.dev
 .env.local
 .env.*.local
-var/
-vendor/
-node_modules/
-.DS_Store
-.idea/
-*.log
-*.lock
-*.tmp
 
-# Ignore Docker and local configs
-docker/
-*.local
-
-# Ignore migrations and cache
-migrations/
-cache/
-
-# Ignore test outputs
+# Test outputs
 test-output/
 
-# Ignore dist and build
-build/
-dist/
-
-# Ignore coverage
-coverage/
-
-# Ignore frontend artifacts
-*.js
-*.jsx
-*.ts
-*.tsx
-*.css
-*.map
-
-# Ignore editor files
+# IDE / Editor
+.DS_Store
+.idea/
 *.swp
 *.swo
 *.bak
-
-# Ignore other system files
 Thumbs.db
+
+# Logs / temp
+*.log
+*.tmp

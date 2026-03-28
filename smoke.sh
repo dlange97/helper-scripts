@@ -244,6 +244,43 @@ mysql_table_exists() {
   [[ "${result}" == "1" ]]
 }
 
+mysql_column_exists() {
+  local database_name="$1"
+  local table_name="$2"
+  local column_name="$3"
+  local result
+
+  result="$("${COMPOSE[@]}" exec -T \
+    -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+    mysql \
+    mysql -sN -uroot \
+    -e "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='${database_name}' AND table_name='${table_name}' AND column_name='${column_name}';" \
+    2>/dev/null)" || return 1
+
+  [[ "${result}" == "1" ]]
+}
+
+assert_mysql_column_exists() {
+  local database_name="$1"
+  local table_name="$2"
+  local column_name="$3"
+  local description="$4"
+
+  if mysql_column_exists "$database_name" "$table_name" "$column_name"; then
+    echo "✅ $description column exists: $database_name.$table_name.$column_name"
+    return 0
+  fi
+
+  echo "❌ Missing required column after migrations: $database_name.$table_name.$column_name" >&2
+  "${COMPOSE[@]}" exec -T \
+    -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+    mysql \
+    mysql -uroot \
+    -e "SHOW CREATE TABLE \`${database_name}\`.\`${table_name}\`;" \
+    >&2 || true
+  exit 1
+}
+
 assert_mysql_table_exists() {
   local database_name="$1"
   local table_name="$2"
@@ -313,6 +350,25 @@ echo "==> Ensuring services are up"
 wait_for_health_status mysql healthy
 ensure_mysql_bootstrap
 
+echo "==> Rebuilding notification images (no cache)"
+BUILD_LOG="${TMPDIR:-/tmp}/smoke-notification-build.log"
+for attempt in 1 2 3; do
+  if "${COMPOSE[@]}" build --no-cache notification-php notification-worker >"$BUILD_LOG" 2>&1; then
+    echo "✅ notification images rebuilt"
+    break
+  fi
+
+  echo "⚠️  notification image rebuild failed (attempt ${attempt}/3)" >&2
+  tail -n 120 "$BUILD_LOG" >&2 || true
+
+  if [[ "$attempt" == "3" ]]; then
+    echo "❌ notification image rebuild failed after 3 attempts" >&2
+    exit 1
+  fi
+
+  sleep 2
+done
+
 SERVICES=(auth-php notification-php dashboard-php events-php nginx)
 if grep -qE '^\s*translation-php:' "$PROJECT_ROOT/my-dashboard-docker/docker-compose.yml" \
   && [[ -d "$PROJECT_ROOT/my-dashboard-backend/translation-service" ]]; then
@@ -334,6 +390,11 @@ if [[ " ${SERVICES[*]} " == *" translation-php "* ]]; then
   wait_for_console_ready translation-php "translation service"
 fi
 
+echo "==> Running early events migration guard"
+sleep 2
+compose_exec events-php php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration >/dev/null
+assert_mysql_column_exists events event shared_with_user_ids "events service"
+
 echo "==> Running DB migrations"
 AUTH_SCHEMA_DEFERRED=0
 if ! run_migration auth-php "auth service" auth user 10 3 "$DEFER_AUTH_USER_FAILURE"; then
@@ -349,6 +410,12 @@ run_migration dashboard-php "dashboard service" dashboard todo_item
 assert_mysql_table_exists dashboard shopping_list "dashboard service"
 run_migration events-php "events service" events event
 assert_mysql_table_exists events route "events service"
+echo "==> Validating events service schema mapping"
+if ! compose_exec events-php php bin/console doctrine:schema:validate --skip-sync 2>&1; then
+  echo "❌ events service schema validation failed — check entity/migration mismatch" >&2
+  exit 1
+fi
+echo "✅ events service schema valid"
 if [[ " ${SERVICES[*]} " == *" translation-php "* ]]; then
   run_migration translation-php "translation service" translations translation 10 3
   assert_mysql_table_exists translations translation "translation service"
@@ -585,6 +652,18 @@ echo "==> Notification template PUT"
 TPL_PUT_STATUS=$(request PUT "${NOTIFICATION_PREFIX}/settings/template/request-access" "$TMP_DIR/template_put.json" '{"channels":{"inbox":{"enabled":true,"title":"Access request from {{email}}","body":"Requester: {{email}}"},"email":{"enabled":false,"title":"Email req","body":"Email body"},"push":{"enabled":false,"title":"Push req","body":"Push body"}}}' "$TOKEN")
 assert_status "template-put" "$TPL_PUT_STATUS" "200" "$TMP_DIR/template_put.json"
 
+echo "==> Todo list (GET collection)"
+TODO_LIST_STATUS=$(request GET "$TODOS_COLLECTION_PATH" "$TMP_DIR/todo_list.json" "" "$TOKEN")
+assert_status "todo-list" "$TODO_LIST_STATUS" "200" "$TMP_DIR/todo_list.json"
+
+echo "==> Shopping list (GET collection)"
+SHOP_LIST_STATUS=$(request GET "$SHOPPING_COLLECTION_PATH" "$TMP_DIR/shop_list.json" "" "$TOKEN")
+assert_status "shopping-list" "$SHOP_LIST_STATUS" "200" "$TMP_DIR/shop_list.json"
+
+echo "==> Events list (GET collection)"
+EVENTS_LIST_STATUS=$(request GET "$EVENTS_COLLECTION_PATH" "$TMP_DIR/events_list.json" "" "$TOKEN")
+assert_status "events-list" "$EVENTS_LIST_STATUS" "200" "$TMP_DIR/events_list.json"
+
 echo "==> Todo create"
 TODO_CREATE_STATUS=$(request POST "$TODOS_COLLECTION_PATH" "$TMP_DIR/todo_create.json" '{"text":"Smoke todo item"}' "$TOKEN")
 assert_status "todo-create" "$TODO_CREATE_STATUS" "201" "$TMP_DIR/todo_create.json"
@@ -772,9 +851,9 @@ echo "- translations admin CRUD pair: 201/200/204"
 echo "- request-access: 202"
 echo "- inbox: 200"
 echo "- template GET/PUT: 200/200"
-echo "- todos create/toggle/update/delete: 201/200/200/204"
-echo "- events create/upcoming/update/delete: 201/200/200/204"
-echo "- shopping create/update/archive/restore/delete: 201/200/200/200/204"
+echo "- todos list/create/toggle/update/delete: 200/201/200/200/204"
+echo "- events list/create/upcoming/update/delete: 200/201/200/200/204"
+echo "- shopping list/create/update/archive/restore/delete: 200/201/200/200/200/204"
 echo "- routes create/list/update/by-event/delete: 201/200/200/200/204"
 echo "- roles list/create/rename/delete: 200/201/200/204"
 echo "- access-settings roleDefinitions: present"

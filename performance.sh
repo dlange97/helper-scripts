@@ -19,10 +19,12 @@ load_env_file() {
 load_env_file "$SCRIPT_DIR/.env"
 load_env_file "$SCRIPT_DIR/.env.dev"
 
-BASE_URL="${BASE_URL:?BASE_URL must be set in helper-scripts/.env or environment}"
+BASE_URL="${BASE_URL:-http://localhost:8081}"
 ADMIN_EMAIL="${ADMIN_EMAIL:?ADMIN_EMAIL must be set in helper-scripts/.env.dev or environment}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in helper-scripts/.env.dev or environment}"
 PERF_REQUESTS="${PERF_REQUESTS:-15}"
+
+if [[ -z "$BASE_URL" ]]; then echo "BASE_URL must be set in helper-scripts/.env or environment"; exit 1; fi
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
