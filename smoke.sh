@@ -538,7 +538,10 @@ request() {
     args+=(-d "$data")
   fi
 
-  curl "${args[@]}"
+  # || true prevents set -e from aborting on curl connection failures (exit 7).
+  # curl still prints 000 via -w "%{http_code}" when it cannot connect,
+  # so callers see "000" and can apply their own retry logic.
+  curl "${args[@]}" || true
 }
 
 resolve_path_prefix() {
@@ -553,7 +556,8 @@ resolve_path_prefix() {
 
   for path in "$@"; do
     status=$(request "$method" "$path" "$output_file" "$data" "$auth_token")
-    if [[ "$status" != "404" ]]; then
+    # 000 = curl could not connect; do not treat as a valid (non-404) prefix.
+    if [[ "$status" != "404" && "$status" != "000" ]]; then
       echo "$path"
       return 0
     fi
@@ -578,6 +582,20 @@ assert_status() {
 
   echo "✅ $name: $actual"
 }
+
+echo "==> Waiting for nginx to accept connections"
+for attempt in {1..30}; do
+  if curl -so /dev/null --max-time 3 "$BASE_URL" 2>/dev/null; then
+    echo "✅ nginx ready"
+    break
+  fi
+  if [[ "$attempt" == "30" ]]; then
+    echo "❌ nginx not reachable at $BASE_URL after 30 attempts" >&2
+    dump_service_logs nginx
+    exit 1
+  fi
+  sleep 2
+done
 
 echo "==> Login"
 LOGIN_PATH=$(resolve_path_prefix "$TMP_DIR/login_probe.json" POST "" "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}" "/api/auth/login" "/auth/login")
