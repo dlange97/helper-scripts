@@ -21,7 +21,7 @@ load_env_file "$SCRIPT_DIR/.env"
 load_env_file "$SCRIPT_DIR/.env.dev"
 
 # Fallbacks for local/dev, but allow override from env or .env files
-BASE_URL="${BASE_URL:-http://localhost:8081}"
+BASE_URL="${BASE_URL:-http://localhost}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin.test@micro.com}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-Admin123!}"
 MYSQL_ROOT_PASSWORD_VALUE="${MYSQL_ROOT_PASSWORD:-root_secret}"
@@ -462,6 +462,27 @@ ADMIN_PREV_INSTANCE_ID="$("${COMPOSE[@]}" exec -T \
   mysql -uroot \
   -e "UPDATE auth.user u INNER JOIN auth.instance i ON i.subdomain='smoke-test' SET u.instance_id=i.id WHERE u.email='$ADMIN_EMAIL';" \
   >/dev/null
+# Save and replace user_instance pivot entries so user has exactly 1 instance
+ADMIN_USER_ID="$("${COMPOSE[@]}" exec -T \
+  -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+  mysql \
+  mysql -sN -uroot \
+  -e "SELECT id FROM auth.user WHERE email='$ADMIN_EMAIL';" \
+  2>/dev/null || true)"
+# Save existing pivot entries
+ADMIN_PREV_PIVOT="$("${COMPOSE[@]}" exec -T \
+  -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+  mysql \
+  mysql -sN -uroot \
+  -e "SELECT instance_id FROM auth.user_instance WHERE user_id='$ADMIN_USER_ID';" \
+  2>/dev/null || true)"
+# Remove all existing pivot entries and add only the smoke instance
+"${COMPOSE[@]}" exec -T \
+  -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+  mysql \
+  mysql -uroot \
+  -e "DELETE FROM auth.user_instance WHERE user_id='$ADMIN_USER_ID'; INSERT INTO auth.user_instance (user_id, instance_id) VALUES ('$ADMIN_USER_ID', '$SMOKE_INSTANCE_ID');" \
+  >/dev/null 2>&1 || true
 echo "✅ Smoke instance assigned"
 
 restore_admin_instance() {
@@ -478,6 +499,22 @@ restore_admin_instance() {
     mysql -uroot \
     -e "$sql" \
     >/dev/null 2>&1 || true
+  # Restore original pivot entries
+  "${COMPOSE[@]}" exec -T \
+    -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+    mysql \
+    mysql -uroot \
+    -e "DELETE FROM auth.user_instance WHERE user_id='${ADMIN_USER_ID}';" \
+    >/dev/null 2>&1 || true
+  while IFS= read -r iid; do
+    [[ -z "$iid" ]] && continue
+    "${COMPOSE[@]}" exec -T \
+      -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+      mysql \
+      mysql -uroot \
+      -e "INSERT IGNORE INTO auth.user_instance (user_id, instance_id) VALUES ('${ADMIN_USER_ID}', '${iid}');" \
+      >/dev/null 2>&1 || true
+  done <<< "$ADMIN_PREV_PIVOT"
 }
 
 TMP_DIR="$(mktemp -d)"
