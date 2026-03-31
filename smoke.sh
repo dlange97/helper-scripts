@@ -439,6 +439,22 @@ compose_exec auth-php php bin/console app:create-test-user \
   --role ROLE_ADMIN \
   --upsert >/dev/null
 
+echo "==> Ensuring smoke test instance exists and is assigned to admin user"
+SMOKE_INSTANCE_ID="c0ffee00-cafe-babe-0000-000000000001"
+"${COMPOSE[@]}" exec -T \
+  -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+  mysql \
+  mysql -uroot \
+  -e "INSERT IGNORE INTO auth.instance (id, name, subdomain, created_at, updated_at) VALUES ('$SMOKE_INSTANCE_ID', 'Smoke Test', 'smoke-test', NOW(), NOW());" \
+  >/dev/null
+"${COMPOSE[@]}" exec -T \
+  -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+  mysql \
+  mysql -uroot \
+  -e "UPDATE auth.user u INNER JOIN auth.instance i ON i.subdomain='smoke-test' SET u.instance_id=i.id WHERE u.email='$ADMIN_EMAIL';" \
+  >/dev/null
+echo "✅ Smoke instance assigned"
+
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -452,6 +468,9 @@ request() {
   local args=(-s -o "$output_file" -w "%{http_code}" -X "$method" "$BASE_URL$path" -H "Content-Type: application/json")
   if [[ -n "$auth_token" ]]; then
     args+=(-H "Authorization: Bearer $auth_token")
+    if [[ -n "${INSTANCE_ID:-}" ]]; then
+      args+=(-H "X-Instance-Id: $INSTANCE_ID")
+    fi
   fi
   if [[ -n "$data" ]]; then
     args+=(-d "$data")
@@ -535,6 +554,30 @@ if [[ -z "$TOKEN" ]]; then
   echo "❌ login failed: token is empty"
   cat "$TMP_DIR/login.json"
   echo
+  exit 1
+fi
+
+INSTANCE_ID=$(python3 - <<PY
+import json, base64, sys
+with open("$TMP_DIR/login.json", "r", encoding="utf-8") as f:
+    payload = json.load(f)
+token = payload.get("token", "")
+if not token:
+    sys.exit(0)
+parts = token.split(".")
+if len(parts) < 2:
+    sys.exit(0)
+p = parts[1]
+p += "=" * (-len(p) % 4)
+try:
+    data = json.loads(base64.b64decode(p))
+    print(data.get("instanceId") or "")
+except Exception:
+    sys.exit(0)
+PY
+)
+if [[ -z "$INSTANCE_ID" ]]; then
+  echo "❌ smoke failed: instanceId not found in JWT — the smoke admin user may not have an assigned instance"
   exit 1
 fi
 
