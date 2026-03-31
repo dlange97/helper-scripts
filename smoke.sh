@@ -21,7 +21,7 @@ load_env_file "$SCRIPT_DIR/.env"
 load_env_file "$SCRIPT_DIR/.env.dev"
 
 # Fallbacks for local/dev, but allow override from env or .env files
-BASE_URL="${BASE_URL:-http://localhost:8081}"
+BASE_URL="${BASE_URL:-http://localhost}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin.test@micro.com}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-Admin123!}"
 MYSQL_ROOT_PASSWORD_VALUE="${MYSQL_ROOT_PASSWORD:-root_secret}"
@@ -439,8 +439,86 @@ compose_exec auth-php php bin/console app:create-test-user \
   --role ROLE_ADMIN \
   --upsert >/dev/null
 
+echo "==> Ensuring smoke test instance exists and is assigned to admin user"
+SMOKE_INSTANCE_ID="c0ffee00-cafe-babe-0000-000000000001"
+
+# Save the admin user's current instance_id so we can restore it after the test
+ADMIN_PREV_INSTANCE_ID="$("${COMPOSE[@]}" exec -T \
+  -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+  mysql \
+  mysql -sN -uroot \
+  -e "SELECT COALESCE(instance_id,'') FROM auth.user WHERE email='$ADMIN_EMAIL';" \
+  2>/dev/null || true)"
+
+"${COMPOSE[@]}" exec -T \
+  -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+  mysql \
+  mysql -uroot \
+  -e "INSERT IGNORE INTO auth.instance (id, name, subdomain, created_at, updated_at) VALUES ('$SMOKE_INSTANCE_ID', 'Smoke Test', 'smoke-test', NOW(), NOW());" \
+  >/dev/null
+"${COMPOSE[@]}" exec -T \
+  -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+  mysql \
+  mysql -uroot \
+  -e "UPDATE auth.user u INNER JOIN auth.instance i ON i.subdomain='smoke-test' SET u.instance_id=i.id WHERE u.email='$ADMIN_EMAIL';" \
+  >/dev/null
+# Save and replace user_instance pivot entries so user has exactly 1 instance
+ADMIN_USER_ID="$("${COMPOSE[@]}" exec -T \
+  -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+  mysql \
+  mysql -sN -uroot \
+  -e "SELECT id FROM auth.user WHERE email='$ADMIN_EMAIL';" \
+  2>/dev/null || true)"
+# Save existing pivot entries
+ADMIN_PREV_PIVOT="$("${COMPOSE[@]}" exec -T \
+  -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+  mysql \
+  mysql -sN -uroot \
+  -e "SELECT instance_id FROM auth.user_instance WHERE user_id='$ADMIN_USER_ID';" \
+  2>/dev/null || true)"
+# Remove all existing pivot entries and add only the smoke instance
+"${COMPOSE[@]}" exec -T \
+  -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+  mysql \
+  mysql -uroot \
+  -e "DELETE FROM auth.user_instance WHERE user_id='$ADMIN_USER_ID'; INSERT INTO auth.user_instance (user_id, instance_id) VALUES ('$ADMIN_USER_ID', '$SMOKE_INSTANCE_ID');" \
+  >/dev/null 2>&1 || true
+echo "✅ Smoke instance assigned"
+
+restore_admin_instance() {
+  local prev="${ADMIN_PREV_INSTANCE_ID:-}"
+  local sql
+  if [[ -n "$prev" ]]; then
+    sql="UPDATE auth.user SET instance_id='${prev}' WHERE email='${ADMIN_EMAIL}';"
+  else
+    sql="UPDATE auth.user SET instance_id=NULL WHERE email='${ADMIN_EMAIL}';"
+  fi
+  "${COMPOSE[@]}" exec -T \
+    -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+    mysql \
+    mysql -uroot \
+    -e "$sql" \
+    >/dev/null 2>&1 || true
+  # Restore original pivot entries
+  "${COMPOSE[@]}" exec -T \
+    -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+    mysql \
+    mysql -uroot \
+    -e "DELETE FROM auth.user_instance WHERE user_id='${ADMIN_USER_ID}';" \
+    >/dev/null 2>&1 || true
+  while IFS= read -r iid; do
+    [[ -z "$iid" ]] && continue
+    "${COMPOSE[@]}" exec -T \
+      -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+      mysql \
+      mysql -uroot \
+      -e "INSERT IGNORE INTO auth.user_instance (user_id, instance_id) VALUES ('${ADMIN_USER_ID}', '${iid}');" \
+      >/dev/null 2>&1 || true
+  done <<< "$ADMIN_PREV_PIVOT"
+}
+
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
+trap 'rm -rf "$TMP_DIR"; restore_admin_instance' EXIT
 
 request() {
   local method="$1"
@@ -452,12 +530,18 @@ request() {
   local args=(-s -o "$output_file" -w "%{http_code}" -X "$method" "$BASE_URL$path" -H "Content-Type: application/json")
   if [[ -n "$auth_token" ]]; then
     args+=(-H "Authorization: Bearer $auth_token")
+    if [[ -n "${INSTANCE_ID:-}" ]]; then
+      args+=(-H "X-Instance-Id: $INSTANCE_ID")
+    fi
   fi
   if [[ -n "$data" ]]; then
     args+=(-d "$data")
   fi
 
-  curl "${args[@]}"
+  # || true prevents set -e from aborting on curl connection failures (exit 7).
+  # curl still prints 000 via -w "%{http_code}" when it cannot connect,
+  # so callers see "000" and can apply their own retry logic.
+  curl "${args[@]}" || true
 }
 
 resolve_path_prefix() {
@@ -472,7 +556,8 @@ resolve_path_prefix() {
 
   for path in "$@"; do
     status=$(request "$method" "$path" "$output_file" "$data" "$auth_token")
-    if [[ "$status" != "404" ]]; then
+    # 000 = curl could not connect; do not treat as a valid (non-404) prefix.
+    if [[ "$status" != "404" && "$status" != "000" ]]; then
       echo "$path"
       return 0
     fi
@@ -497,6 +582,20 @@ assert_status() {
 
   echo "✅ $name: $actual"
 }
+
+echo "==> Waiting for nginx to accept connections"
+for attempt in {1..30}; do
+  if curl -so /dev/null --max-time 3 "$BASE_URL" 2>/dev/null; then
+    echo "✅ nginx ready"
+    break
+  fi
+  if [[ "$attempt" == "30" ]]; then
+    echo "❌ nginx not reachable at $BASE_URL after 30 attempts" >&2
+    dump_service_logs nginx
+    exit 1
+  fi
+  sleep 2
+done
 
 echo "==> Login"
 LOGIN_PATH=$(resolve_path_prefix "$TMP_DIR/login_probe.json" POST "" "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}" "/api/auth/login" "/auth/login")
@@ -535,6 +634,30 @@ if [[ -z "$TOKEN" ]]; then
   echo "❌ login failed: token is empty"
   cat "$TMP_DIR/login.json"
   echo
+  exit 1
+fi
+
+INSTANCE_ID=$(python3 - <<PY
+import json, base64, sys
+with open("$TMP_DIR/login.json", "r", encoding="utf-8") as f:
+    payload = json.load(f)
+token = payload.get("token", "")
+if not token:
+    sys.exit(0)
+parts = token.split(".")
+if len(parts) < 2:
+    sys.exit(0)
+p = parts[1]
+p += "=" * (-len(p) % 4)
+try:
+    data = json.loads(base64.b64decode(p))
+    print(data.get("instanceId") or "")
+except Exception:
+    sys.exit(0)
+PY
+)
+if [[ -z "$INSTANCE_ID" ]]; then
+  echo "❌ smoke failed: instanceId not found in JWT — the smoke admin user may not have an assigned instance"
   exit 1
 fi
 
@@ -843,6 +966,184 @@ if [[ "$HAS_DEFS" != "yes" ]]; then
 fi
 echo "✅ access-settings-defs: roleDefinitions present (>=4)"
 
+# ---------------------------------------------------------------------------
+# Checkout flow smoke test (test2 instance)
+# ---------------------------------------------------------------------------
+echo "==> Checkout: generate invite"
+CHECKOUT_RAW=$(compose_exec auth-php php bin/console app:generate-checkout-link \
+  --base-url="$BASE_URL" --no-ansi 2>&1 || true)
+CHECKOUT_HASH=$(echo "$CHECKOUT_RAW" | grep -oE '/checkout/[a-f0-9]{64}' | head -1 | sed 's|/checkout/||')
+if [[ -z "$CHECKOUT_HASH" ]]; then
+  echo "❌ checkout-generate failed: could not extract hash from output"
+  echo "$CHECKOUT_RAW"
+  exit 1
+fi
+echo "✅ checkout-generate: hash extracted"
+
+echo "==> Checkout: validate invite"
+CHECKOUT_VALIDATE_STATUS=$(request GET "/auth/checkout/$CHECKOUT_HASH/validate" \
+  "$TMP_DIR/checkout_validate.json")
+assert_status "checkout-validate" "$CHECKOUT_VALIDATE_STATUS" "200" "$TMP_DIR/checkout_validate.json"
+CHECKOUT_VALID=$(python3 - <<PY
+import json
+with open("$TMP_DIR/checkout_validate.json", "r", encoding="utf-8") as f:
+    payload = json.load(f)
+print("yes" if payload.get("valid") is True else "no")
+PY
+)
+if [[ "$CHECKOUT_VALID" != "yes" ]]; then
+  echo "❌ checkout-validate failed: valid is not true"
+  cat "$TMP_DIR/checkout_validate.json"
+  echo
+  exit 1
+fi
+echo "✅ checkout-validate: valid=true"
+
+# Pre-clean any leftover test2 data so the test is idempotent on re-run
+"${COMPOSE[@]}" exec -T \
+  -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+  mysql \
+  mysql -uroot \
+  -e "DELETE ui FROM auth.user_instance ui INNER JOIN auth.user u ON u.id=ui.user_id WHERE u.email='admin.test2@micro.com'; DELETE FROM auth.user WHERE email='admin.test2@micro.com'; DELETE FROM auth.instance WHERE subdomain='test2';" \
+  >/dev/null 2>&1 || true
+
+echo "==> Checkout: complete (create test2 instance)"
+CHECKOUT_COMPLETE_STATUS=$(request POST "/auth/checkout/$CHECKOUT_HASH" \
+  "$TMP_DIR/checkout_complete.json" \
+  '{"instanceName":"Test Two","instanceSubdomain":"test2","adminEmail":"admin.test2@micro.com","adminPassword":"Admin123!","adminFirstName":"Admin","adminLastName":"Two"}')
+assert_status "checkout-complete" "$CHECKOUT_COMPLETE_STATUS" "201" "$TMP_DIR/checkout_complete.json"
+
+CHECKOUT_SUBDOMAIN=$(python3 - <<PY
+import json
+with open("$TMP_DIR/checkout_complete.json", "r", encoding="utf-8") as f:
+    payload = json.load(f)
+print(payload.get("subdomain", ""))
+PY
+)
+CHECKOUT_TOKEN=$(python3 - <<PY
+import json
+with open("$TMP_DIR/checkout_complete.json", "r", encoding="utf-8") as f:
+    payload = json.load(f)
+print(payload.get("token", ""))
+PY
+)
+CHECKOUT_INSTANCE_ID=$(python3 - <<PY
+import json
+with open("$TMP_DIR/checkout_complete.json", "r", encoding="utf-8") as f:
+    payload = json.load(f)
+print(payload.get("instanceId", ""))
+PY
+)
+
+if [[ "$CHECKOUT_SUBDOMAIN" != "test2" ]]; then
+  echo "❌ checkout-complete failed: subdomain is '$CHECKOUT_SUBDOMAIN', expected 'test2'"
+  cat "$TMP_DIR/checkout_complete.json"
+  echo
+  exit 1
+fi
+if [[ -z "$CHECKOUT_TOKEN" ]]; then
+  echo "❌ checkout-complete failed: token is empty"
+  cat "$TMP_DIR/checkout_complete.json"
+  echo
+  exit 1
+fi
+if [[ -z "$CHECKOUT_INSTANCE_ID" ]]; then
+  echo "❌ checkout-complete failed: instanceId is empty"
+  cat "$TMP_DIR/checkout_complete.json"
+  echo
+  exit 1
+fi
+echo "✅ checkout-complete: instance=$CHECKOUT_INSTANCE_ID subdomain=$CHECKOUT_SUBDOMAIN token present"
+
+echo "==> Checkout: verify DB — instance row"
+CHECKOUT_DB_INSTANCE=$("${COMPOSE[@]}" exec -T \
+  -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+  mysql \
+  mysql -sN -uroot \
+  -e "SELECT id FROM auth.instance WHERE subdomain='test2';" \
+  2>/dev/null || true)
+if [[ -z "$CHECKOUT_DB_INSTANCE" ]]; then
+  echo "❌ checkout-db-instance failed: test2 instance not found in auth.instance"
+  exit 1
+fi
+echo "✅ checkout-db-instance: test2 instance exists ($CHECKOUT_DB_INSTANCE)"
+
+echo "==> Checkout: verify DB — user row"
+CHECKOUT_DB_USER=$("${COMPOSE[@]}" exec -T \
+  -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+  mysql \
+  mysql -sN -uroot \
+  -e "SELECT id FROM auth.user WHERE email='admin.test2@micro.com';" \
+  2>/dev/null || true)
+if [[ -z "$CHECKOUT_DB_USER" ]]; then
+  echo "❌ checkout-db-user failed: admin.test2@micro.com not found in auth.user"
+  exit 1
+fi
+echo "✅ checkout-db-user: test2 admin user exists ($CHECKOUT_DB_USER)"
+
+echo "==> Checkout: verify DB — user_instance pivot"
+CHECKOUT_DB_PIVOT=$("${COMPOSE[@]}" exec -T \
+  -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+  mysql \
+  mysql -sN -uroot \
+  -e "SELECT COUNT(*) FROM auth.user_instance ui INNER JOIN auth.user u ON u.id=ui.user_id INNER JOIN auth.instance i ON i.id=ui.instance_id WHERE u.email='admin.test2@micro.com' AND i.subdomain='test2';" \
+  2>/dev/null || true)
+if [[ "$CHECKOUT_DB_PIVOT" != "1" ]]; then
+  echo "❌ checkout-db-pivot failed: expected 1 pivot row, got '$CHECKOUT_DB_PIVOT'"
+  exit 1
+fi
+echo "✅ checkout-db-pivot: user_instance pivot row exists"
+
+echo "==> Checkout: JWT login with test2 admin"
+CHECKOUT_LOGIN_STATUS=$(request POST "$LOGIN_PATH" "$TMP_DIR/checkout_login.json" \
+  '{"email":"admin.test2@micro.com","password":"Admin123!"}')
+assert_status "checkout-login" "$CHECKOUT_LOGIN_STATUS" "200" "$TMP_DIR/checkout_login.json"
+
+echo "==> Checkout: re-use hash blocked (404)"
+CHECKOUT_REUSE_STATUS=$(request POST "/auth/checkout/$CHECKOUT_HASH" \
+  "$TMP_DIR/checkout_reuse.json" \
+  '{"instanceName":"Test Two Again","instanceSubdomain":"test2again","adminEmail":"admin.test2again@micro.com","adminPassword":"Admin123!","adminFirstName":"Admin","adminLastName":"Again"}')
+assert_status "checkout-reuse-blocked" "$CHECKOUT_REUSE_STATUS" "404" "$TMP_DIR/checkout_reuse.json"
+
+echo "==> Checkout: cleanup test2 instance"
+"${COMPOSE[@]}" exec -T \
+  -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+  mysql \
+  mysql -uroot \
+  -e "DELETE ui FROM auth.user_instance ui INNER JOIN auth.user u ON u.id=ui.user_id WHERE u.email='admin.test2@micro.com'; DELETE FROM auth.user WHERE email='admin.test2@micro.com'; DELETE FROM auth.instance WHERE subdomain='test2';" \
+  >/dev/null 2>&1 || true
+echo "✅ checkout-cleanup: test2 instance and user removed"
+# ---------------------------------------------------------------------------
+
+echo "==> Code quality checks (phpcs + phpstan)"
+run_quality() {
+  local svc="$1"
+  local name="$2"
+
+  echo "  --> phpcs ($name)"
+  if ! compose_exec "$svc" sh -lc "cd /app && composer run lint:phpcs 2>&1"; then
+    echo "❌ phpcs: $name failed" >&2
+    exit 1
+  fi
+  echo "✅ phpcs: $name"
+
+  echo "  --> phpstan ($name)"
+  if ! compose_exec "$svc" sh -lc "cd /app && composer run lint:phpstan 2>&1"; then
+    echo "❌ phpstan: $name failed" >&2
+    exit 1
+  fi
+  echo "✅ phpstan: $name"
+}
+
+run_quality "auth-php" "auth service"
+run_quality "dashboard-php" "dashboard service"
+run_quality "events-php" "events service"
+run_quality "notification-php" "notification service"
+if [[ " ${SERVICES[*]} " == *" translation-php "* ]]; then
+  run_quality "translation-php" "translation service"
+fi
+echo "✅ Code quality passed"
+
 printf "\n🎉 Smoke passed on clean stack\n"
 echo "- login: 200"
 echo "- auth-me: 200"
@@ -858,3 +1159,9 @@ echo "- routes create/list/update/by-event/delete: 201/200/200/200/204"
 echo "- roles list/create/rename/delete: 200/201/200/204"
 echo "- access-settings roleDefinitions: present"
 echo "- public register blocked: 401"
+echo "- checkout generate/validate/complete: 200/200/201"
+echo "- checkout db: instance+user+pivot verified"
+echo "- checkout login with new admin: 200"
+echo "- checkout reuse blocked: 404"
+echo "- phpcs: all services passed"
+echo "- phpstan: all services passed"
