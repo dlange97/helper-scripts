@@ -58,6 +58,18 @@ You are an expert Backend Architect specializing in PHP 8.3+, Symfony 7+, and Di
   - `bash ./helper-scripts/run-all-checks.sh`
 - Do not mark work as completed when any of the commands above fails.
 
+## Pre-Push Requirement — MANDATORY
+
+**Always run smoke tests before pushing any code.** This is a hard gate, not optional:
+
+```bash
+bash my-dashboard-backend/helper-scripts/smoke.sh
+```
+
+- `push-all.sh` enforces this automatically — it runs smoke and aborts if any test fails.
+- When pushing individual repos with `git push`, run `myapp smoke` (or `bash smoke.sh`) manually first.
+- A failed smoke means broken production-facing behaviour. Do not push until it is green.
+
 ## Repository-Specific Focus (Helper Scripts)
 
 - Treat this repository as the CI gatekeeper for cross-service correctness.
