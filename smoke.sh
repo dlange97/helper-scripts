@@ -441,6 +441,15 @@ compose_exec auth-php php bin/console app:create-test-user \
 
 echo "==> Ensuring smoke test instance exists and is assigned to admin user"
 SMOKE_INSTANCE_ID="c0ffee00-cafe-babe-0000-000000000001"
+
+# Save the admin user's current instance_id so we can restore it after the test
+ADMIN_PREV_INSTANCE_ID="$("${COMPOSE[@]}" exec -T \
+  -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+  mysql \
+  mysql -sN -uroot \
+  -e "SELECT COALESCE(instance_id,'') FROM auth.user WHERE email='$ADMIN_EMAIL';" \
+  2>/dev/null || true)"
+
 "${COMPOSE[@]}" exec -T \
   -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
   mysql \
@@ -455,8 +464,24 @@ SMOKE_INSTANCE_ID="c0ffee00-cafe-babe-0000-000000000001"
   >/dev/null
 echo "✅ Smoke instance assigned"
 
+restore_admin_instance() {
+  local prev="${ADMIN_PREV_INSTANCE_ID:-}"
+  local sql
+  if [[ -n "$prev" ]]; then
+    sql="UPDATE auth.user SET instance_id='${prev}' WHERE email='${ADMIN_EMAIL}';"
+  else
+    sql="UPDATE auth.user SET instance_id=NULL WHERE email='${ADMIN_EMAIL}';"
+  fi
+  "${COMPOSE[@]}" exec -T \
+    -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
+    mysql \
+    mysql -uroot \
+    -e "$sql" \
+    >/dev/null 2>&1 || true
+}
+
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
+trap 'rm -rf "$TMP_DIR"; restore_admin_instance' EXIT
 
 request() {
   local method="$1"
