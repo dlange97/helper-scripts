@@ -886,6 +886,35 @@ if [[ "$HAS_DEFS" != "yes" ]]; then
 fi
 echo "✅ access-settings-defs: roleDefinitions present (>=4)"
 
+echo "==> Code quality checks (phpcs + phpstan)"
+run_quality() {
+  local svc="$1"
+  local name="$2"
+
+  echo "  --> phpcs ($name)"
+  if ! compose_exec "$svc" sh -lc "cd /app && composer run lint:phpcs 2>&1"; then
+    echo "❌ phpcs: $name failed" >&2
+    exit 1
+  fi
+  echo "✅ phpcs: $name"
+
+  echo "  --> phpstan ($name)"
+  if ! compose_exec "$svc" sh -lc "cd /app && composer run lint:phpstan 2>&1"; then
+    echo "❌ phpstan: $name failed" >&2
+    exit 1
+  fi
+  echo "✅ phpstan: $name"
+}
+
+run_quality "auth-php" "auth service"
+run_quality "dashboard-php" "dashboard service"
+run_quality "events-php" "events service"
+run_quality "notification-php" "notification service"
+if [[ " ${SERVICES[*]} " == *" translation-php "* ]]; then
+  run_quality "translation-php" "translation service"
+fi
+echo "✅ Code quality passed"
+
 printf "\n🎉 Smoke passed on clean stack\n"
 echo "- login: 200"
 echo "- auth-me: 200"
@@ -901,3 +930,5 @@ echo "- routes create/list/update/by-event/delete: 201/200/200/200/204"
 echo "- roles list/create/rename/delete: 200/201/200/204"
 echo "- access-settings roleDefinitions: present"
 echo "- public register blocked: 401"
+echo "- phpcs: all services passed"
+echo "- phpstan: all services passed"
