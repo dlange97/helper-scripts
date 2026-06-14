@@ -1003,7 +1003,7 @@ echo "✅ checkout-validate: valid=true"
 "${COMPOSE[@]}" exec -T \
   -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
   mysql \
-  mysql -uroot auth \
+  mysql -uroot \
   -e "DELETE ui FROM auth.user_instance ui INNER JOIN auth.user u ON u.id=ui.user_id WHERE u.email='admin.test2@micro.com'; DELETE FROM auth.user WHERE email='admin.test2@micro.com'; DELETE FROM auth.instance WHERE subdomain='test2';" \
   >/dev/null 2>&1 || true
 
@@ -1109,7 +1109,7 @@ echo "==> Checkout: cleanup test2 instance"
 "${COMPOSE[@]}" exec -T \
   -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD_VALUE}" \
   mysql \
-  mysql -uroot auth \
+  mysql -uroot \
   -e "DELETE ui FROM auth.user_instance ui INNER JOIN auth.user u ON u.id=ui.user_id WHERE u.email='admin.test2@micro.com'; DELETE FROM auth.user WHERE email='admin.test2@micro.com'; DELETE FROM auth.instance WHERE subdomain='test2';" \
   >/dev/null 2>&1 || true
 echo "✅ checkout-cleanup: test2 instance and user removed"
