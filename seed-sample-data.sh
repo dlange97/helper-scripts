@@ -17,7 +17,7 @@ load_env_file() {
 load_env_file "$SCRIPT_DIR/.env"
 load_env_file "$SCRIPT_DIR/.env.dev"
 
-BASE_URL="${BASE_URL:-http://localhost:8081}"
+BASE_URL="${BASE_URL:-http://localhost}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin.test@micro.com}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-Admin123!}"
 SEED_COUNT="${SEED_COUNT:-20}"
@@ -54,6 +54,9 @@ request() {
 
   if [[ -n "$token" ]]; then
     curl_args+=( -H "Authorization: Bearer $token" )
+    if [[ -n "${INSTANCE_ID:-}" ]]; then
+      curl_args+=( -H "X-Instance-Id: $INSTANCE_ID" )
+    fi
   fi
 
   if [[ -n "$body" ]]; then
@@ -113,6 +116,31 @@ if [[ -z "$TOKEN" ]]; then
   echo "❌ login failed: token is empty" >&2
   exit 1
 fi
+
+INSTANCE_ID=$(python3 - <<PY
+import json, base64, sys
+with open("$TMP_DIR/login.json", "r", encoding="utf-8") as f:
+    payload = json.load(f)
+token = payload.get("token", "")
+if not token:
+    sys.exit(0)
+parts = token.split(".")
+if len(parts) < 2:
+    sys.exit(0)
+p = parts[1]
+p += "=" * (-len(p) % 4)
+try:
+    data = json.loads(base64.b64decode(p))
+    print(data.get("instanceId") or "")
+except Exception:
+    sys.exit(0)
+PY
+)
+if [[ -z "$INSTANCE_ID" ]]; then
+  echo "❌ seed failed: instanceId missing from JWT — run create-fixtures.sh first to assign an instance to this user" >&2
+  exit 1
+fi
+echo "==> Using instance: $INSTANCE_ID"
 
 EVENTS_COLLECTION_PATH=$(resolve_path_prefix "$TMP_DIR/events_probe.json" GET "$TOKEN" "" "/api/events" "/events")
 TODOS_COLLECTION_PATH=$(resolve_path_prefix "$TMP_DIR/todos_probe.json" GET "$TOKEN" "" "/api/todos" "/dashboard/todos")
